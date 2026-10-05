@@ -12,18 +12,17 @@ You need **three Ubuntu machines** (or one big machine for dev):
 
 Everything lives in one repo — only a subset is used per machine.
 
-## 2. Copy the repo to Ubuntu
-
-From Windows (PowerShell) to each Ubuntu host:
-
-```powershell
-scp -r C:\wifi_gateway user@ubuntu-host:/opt/odivora
-```
-
-Or on the Ubuntu host:
+## 2. Get the code on each Ubuntu machine
 
 ```bash
-git clone <your-repo-url> /opt/odivora
+sudo git clone https://github.com/sololito/v1a-control-plane-working.git /opt/odivora
+cd /opt/odivora
+```
+
+To update later:
+
+```bash
+cd /opt/odivora && sudo git pull
 ```
 
 Required files per machine:
