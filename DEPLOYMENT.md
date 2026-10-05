@@ -1,7 +1,8 @@
 # Deployment (production)
-> For a fresh Ubuntu box with the V1B WireGuard relay/gateway stack, use
-> **DEPLOY_UBUNTU_V1B.md** and the scripts in `deploy/`. This file remains
-> the reference for scaling/ops notes.
+> For a fresh Ubuntu box with the V1B WireGuard relay/gateway stack, see the
+> step-by-step per-machine guide **DEPLOY_UBUNTU_FULL.md** (install Python,
+> libraries, services, firewall, end-to-end test) and the helper scripts in
+> `deploy/`. This file remains the reference for scaling/ops notes.
 
 - Env: copy `.env.example` -> `.env`. Prod must set: `APP_ENV=prod`, `SECRET_KEY` (32+ random),
   `DATABASE_URL=postgresql+psycopg2://...`, `REDIS_URL`, `CORS_ORIGINS=https://your-app`.
