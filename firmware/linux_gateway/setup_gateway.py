@@ -66,11 +66,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--api-base", default=os.environ.get("ODIVORA_API_BASE", "http://127.0.0.1:8000"))
     ap.add_argument("--device-type", default="linux")
+    ap.add_argument("--reset", action="store_true", help="wipe local state and re-register")
     args = ap.parse_args()
     # Strip copy-paste artifacts like "<IP>" or a trailing ">"
     args.api_base = args.api_base.strip().strip("<>")
     if not args.api_base.startswith(("http://", "https://")):
         sys.exit(f"Invalid --api-base: {args.api_base}  (must start with http:// or https://)")
+    if args.reset:
+        for p in (STATE_FILE, ENV_FILE, WG_PRIVATE_KEY_FILE):
+            try: os.remove(p)
+            except FileNotFoundError: pass
+        print("Local state wiped.")
     _ensure_dirs()
 
     # 1. identity + register
@@ -103,17 +109,21 @@ def main():
 
     # 2. gateway token (after claim)
     if not state.get("gateway_token"):
-        print("\nClaim the gateway from your account first, e.g.:")
-        print(f"  curl -X POST {args.api_base}/api/v1/me/gateways/{state['gateway_id']}/claim \\")
-        print(f"    -H 'Authorization: Bearer <your_user_access_token>' \\")
-        print(f"    -H 'Content-Type: application/json' \\")
-        print(f"    -d '{{\"pairing_code\": \"<code>\"}}'")
-        tok = input("Paste the gateway_token from the claim response: ").strip()
-        if not tok:
-            sys.exit("No token provided.")
-        state["gateway_token"] = tok
+        pairing = input("Enter the pairing code printed above (or from the API): ").strip()
+        user_token = input("Paste your ODIVORA user access token (owner): ").strip()
+        if not pairing or not user_token:
+            sys.exit("Pairing code and user access token are both required.")
+        code, res = _post(
+            f"{args.api_base}/api/v1/me/gateways/{state['gateway_id']}/claim",
+            {"pairing_code": pairing}, token=user_token)
+        if code != 200:
+            sys.exit(f"claim failed {code}: {res}\n(If the code expired, rerun with --reset.)")
+        state["gateway_token"] = res["gateway_token"]
         with open(STATE_FILE, "w") as f:
             json.dump(state, f)
+        print("Claimed. gateway_token stored.")
+    else:
+        print("gateway_token already present.")
 
     # 3. generate WG keypair (owner token required by the API)
     if not os.path.exists(WG_PRIVATE_KEY_FILE):
