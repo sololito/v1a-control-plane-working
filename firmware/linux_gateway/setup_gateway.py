@@ -42,6 +42,16 @@ def _post(url, payload, token=None):
             return r.status, json.loads(r.read().decode())
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read().decode() or "{}")
+    except urllib.error.URLError as e:
+        sys.exit(
+            f"\n[SETUP ERROR] Cannot reach the ODIVORA API at {url}\n"
+            f"  {e.reason}\n"
+            "  Checklist:\n"
+            "   1. Remove '<' '>' characters from --api-base; use the real IP.\n"
+            "   2. Use the API host's real LAN IP, not a broadcast/subnet address.\n"
+            "   3. Verify it works here first:  curl http://<API_IP>:8000/health\n"
+            "   4. Make sure both machines can route to each other.\n"
+        )
 
 
 def _ensure_dirs():
@@ -57,6 +67,10 @@ def main():
     ap.add_argument("--api-base", default=os.environ.get("ODIVORA_API_BASE", "http://127.0.0.1:8000"))
     ap.add_argument("--device-type", default="linux")
     args = ap.parse_args()
+    # Strip copy-paste artifacts like "<IP>" or a trailing ">"
+    args.api_base = args.api_base.strip().strip("<>")
+    if not args.api_base.startswith(("http://", "https://")):
+        sys.exit(f"Invalid --api-base: {args.api_base}  (must start with http:// or https://)")
     _ensure_dirs()
 
     # 1. identity + register
