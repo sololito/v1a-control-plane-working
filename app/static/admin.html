@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ODIVORA Admin</title>
+<style>
+body{font-family:system-ui,Arial,sans-serif;max-width:1100px;margin:24px auto;padding:0 16px;color:#111}
+header{display:flex;justify-content:space-between;align-items:center}
+nav button{margin-right:8px;padding:6px 12px;cursor:pointer}
+table{border-collapse:collapse;width:100%;margin:12px 0;font-size:14px}
+th,td{border:1px solid #ddd;padding:6px 8px;text-align:left}
+th{background:#f4f4f4}
+.alert-crit{background:#fde2e2}.alert-warn{background:#fff4d6}.alert-info{background:#e6f0ff}
+#login{max-width:360px}#err{color:#b00}.muted{color:#666;font-size:13px}
+section{display:none}section.on{display:block}
+</style>
+</head>
+<body>
+<header><h2>ODIVORA Home Connectivity — Admin</h2><div><span id="who" class="muted"></span> <button id="logout" style="display:none">Logout</button></div></header>
+<div id="err"></div>
+<section id="login" class="on">
+<h3>Admin login</h3>
+<input id="email" type="email" placeholder="admin email" style="width:100%;margin:4px 0"><br>
+<input id="pw" type="password" placeholder="password" style="width:100%;margin:4px 0"><br>
+<button id="go">Login</button>
+<p class="muted">Uses <code>/api/v1/auth/login</code>; requires <code>is_admin</code>. Token kept in sessionStorage only.</p>
+</section>
+<section id="app">
+<nav>
+<button data-t="active">Active users</button><button data-t="stats">Stats/Alerts</button><button data-t="gw">Gateways</button><button data-t="sess">Sessions</button><button data-t="audit">Audit</button><button data-t="ops">Ops</button>
+</nav>
+<div id="panels">
+<div id="p-active"><h3>Active users (seen ≤15m)</h3><div id="t-active"></div></div>
+<div id="p-stats"><h3>Stats</h3><div id="t-stats"></div><h3>Alerts</h3><div id="t-alerts"></div></div>
+<div id="p-gw"><h3>Gateways</h3><div id="t-gw"></div></div>
+<div id="p-sess"><h3>Sessions</h3><div id="t-sess"></div></div>
+<div id="p-audit"><h3>Audit (latest)</h3><div id="t-audit"></div></div>
+<div id="p-ops"><h3>Ops</h3><button id="sweep">Run sweep (expire+offline)</button> <span id="sweep-out" class="muted"></span>
+<p class="muted">Prometheus: <a href="/metrics/prometheus" target="_blank">/metrics/prometheus</a> · rules in <code>prometheus/alert_rules.yml</code></p></div>
+</div>
+</section>
+<script>
+const $=id=>document.getElementById(id);
+const API="/api/v1";
+const tok=()=>sessionStorage.getItem("adm_tok")||"";
+const H=()=>({Authorization:"Bearer "+tok(),"Content-Type":"application/json"});
+const esc=s=>String(s==null?"":s).replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function err(m){$("err").textContent=m||""}
+async function jget(p){const r=await fetch(API+p,{headers:H()});if(!r.ok)throw new Error(p+" -> "+r.status);return r.json()}
+async function jpost(p,b){const r=await fetch(API+p,{method:"POST",headers:H(),body:b?JSON.stringify(b):null});if(!r.ok)throw new Error(p+" -> "+r.status+" "+await r.text());return r.json()}
+function tab(name){document.querySelectorAll("#panels>div").forEach(d=>d.style.display="none");$("p-"+name).style.display="block";load(name)}
+document.querySelectorAll("nav button").forEach(b=>b.onclick=()=>tab(b.dataset.t));
+$("go").onclick=async()=>{err("");try{
+  const r=await fetch(API+"/auth/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({email:$("email").value,password:$("pw").value})});
+  if(!r.ok)throw new Error("login -> "+r.status);
+  const t=await r.json();sessionStorage.setItem("adm_tok",t.access_token);
+  const me=await jget("/me");if(!me.is_admin){sessionStorage.removeItem("adm_tok");throw new Error("not an admin account")}
+  $("who").textContent=me.email;$("logout").style.display="";$("login").classList.remove("on");$("login").style.display="none";$("app").classList.add("on");$("app").style.display="block";tab("active");
+}catch(e){err(e.message)}};
+$("logout").onclick=()=>{sessionStorage.removeItem("adm_tok");location.reload()};
+async function load(name){err("");try{
+  if(name==="active"){const u=await jget("/admin/users/active");$("t-active").innerHTML=u.length?("<table><tr><th>email</th><th>devices</th><th>recent</th><th>last seen</th><th>gateways</th><th>sessions</th><th></th></tr>"+u.map(x=>"<tr><td>"+esc(x.email)+"</td><td>"+x.devices_active+"</td><td>"+x.devices_seen_recently+"</td><td>"+esc(x.last_seen||"")+"</td><td>"+x.gateways_owned+"</td><td>"+x.sessions_active+"</td><td><button onclick=\"disUser('"+x.id+"')\">disable</button></td></tr>").join("")+"</table>"):"<p class=muted>No active users in window.</p>"}
+  if(name==="stats"){const s=await jget("/admin/stats");$("t-stats").innerHTML="<pre>"+esc(JSON.stringify(s,null,2))+"</pre>";const a=await jget("/admin/alerts");$("t-alerts").innerHTML=a.alerts.length?a.alerts.map(x=>"<div class='alert-"+(x.severity==="critical"?"crit":x.severity==="warning"?"warn":"info")+"'>["+esc(x.severity)+"] "+esc(x.type)+" — "+esc(x.message)+"</div>").join(""):"<p class=muted>No alerts.</p>"}
+  if(name==="gw"){const g=await jget("/admin/gateways?limit=50");$("t-gw").innerHTML="<table><tr><th>id</th><th>status</th><th>owner</th><th>last seen</th><th></th></tr>"+g.map(x=>"<tr><td>"+esc(x.id.slice(0,8))+"</td><td>"+esc(x.status)+"</td><td>"+esc((x.owner||"").slice(0,8))+"</td><td>"+esc(x.last_seen||"")+"</td><td><button onclick=\"revGw('"+x.id+"')\">revoke</button></td></tr>").join("")+"</table>"}
+  if(name==="sess"){const s=await jget("/admin/sessions?limit=50");$("t-sess").innerHTML="<table><tr><th>id</th><th>status</th><th>gateway</th><th>user</th><th></th></tr>"+s.map(x=>"<tr><td>"+esc(x.id.slice(0,8))+"</td><td>"+esc(x.status)+"</td><td>"+esc(x.gateway_id.slice(0,8))+"</td><td>"+esc(x.user_id.slice(0,8))+"</td><td><button onclick=\"revSess('"+x.id+"')\">revoke</button></td></tr>").join("")+"</table>"}
+  if(name==="audit"){const a=await jget("/admin/audit?limit=50");$("t-audit").innerHTML="<table><tr><th>action</th><th>actor</th><th>resource</th><th>at</th></tr>"+a.map(x=>"<tr><td>"+esc(x.action)+"</td><td>"+esc((x.actor||"").slice(0,12))+"</td><td>"+esc((x.resource||"").slice(0,12))+"</td><td>"+esc(x.at||"")+"</td></tr>").join("")+"</table>"}
+}catch(e){err(e.message)}}
+window.disUser=async id=>{if(!confirm("Disable user?"))return;await jpost("/admin/users/"+id+"/disable");load("active")};
+window.revGw=async id=>{if(!confirm("Revoke gateway?"))return;await jpost("/admin/gateways/"+id+"/revoke");load("gw")};
+window.revSess=async id=>{await jpost("/admin/sessions/"+id+"/revoke");load("sess")};
+$("sweep").onclick=async()=>{const r=await jpost("/admin/jobs/sweep");$("sweep-out").textContent=JSON.stringify(r)};
+document.querySelectorAll("#panels>div").forEach(d=>d.style.display="none");
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+[Unit]
+Description=ODIVORA Relay (UDP pair-forwarder)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/opt/odivora/venv/bin/python /opt/odivora/firmware/relay/odivora_relay.py --control 0.0.0.0:9090 --rendezvous-port 3478
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

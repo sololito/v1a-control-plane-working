@@ -1,0 +1,672 @@
+You are the lead backend architect for a new connectivity platform called **ODIVORA Home Connectivity**.
+
+We are building a system that will initially allow a user to securely access their own home internet connection while travelling. A small gateway device at the user's home will eventually maintain a secure connection to our cloud infrastructure. A mobile application will allow the user to authenticate and request a connection to their registered home gateway.
+
+This is **NOT part of the existing ODIVORA platform**. Treat it as a completely separate product/project.
+
+## Current objective
+
+Build the **server-side foundation only**.
+
+Do NOT build the complete mobile application, ESP32 firmware, payment system, or Wi-Fi marketplace yet.
+
+The server must be designed from the beginning to support thousands of users and gateways and be expandable into a larger connectivity platform later.
+
+---
+
+# 1. Core architecture
+
+Design the backend around these conceptual components:
+
+* API server
+* Authentication service
+* User management
+* Device/gateway registry
+* Gateway authentication
+* Mobile-device authentication
+* Authorization service
+* Connection/session management
+* Tunnel coordination/signalling
+* Usage/session tracking
+* Subscription-ready architecture
+* Administrative functions
+* Logging/auditing
+* Health monitoring
+* Configuration management
+
+Use a modular architecture so individual components can later be separated into services if scale requires it.
+
+Do NOT create an unnecessarily complicated microservice architecture for the MVP. Start as a well-structured modular backend/monolith with clear boundaries so it can later be split into services.
+
+---
+
+# 2. Users
+
+Create a proper user model.
+
+A user should eventually be able to have:
+
+* multiple mobile devices
+* one or more home gateways
+* multiple active sessions
+* subscription information
+* connection history
+
+Do not hard-code the system around one user having one gateway.
+
+Example conceptual relationship:
+
+User
+├── Mobile Device 1
+├── Mobile Device 2
+├── Home Gateway 1
+└── Home Gateway 2
+
+The database must support these relationships properly.
+
+---
+
+# 3. Gateway/device identity
+
+Design a secure device registration model.
+
+Each Home Gateway should have:
+
+* unique gateway ID
+* cryptographic/public-key identity
+* registration status
+* owner/user ID
+* device type
+* firmware/software version
+* last-seen timestamp
+* online/offline status
+* IP/network metadata where appropriate
+* creation date
+* revocation status
+* health information
+
+Do NOT use only a username/password for gateway authentication.
+
+The eventual ESP32 gateway should be able to authenticate cryptographically.
+
+Design the database/API so we can later support:
+
+* ESP32 gateways
+* Linux gateways
+* OpenWrt gateways
+* other hardware
+
+without changing the fundamental user model.
+
+---
+
+# 4. Mobile device identity
+
+Treat each mobile installation as a separately identifiable device.
+
+A user may have:
+
+* Phone A
+* Phone B
+* Tablet
+
+Allow individual device revocation.
+
+If Phone A is compromised, the user should be able to revoke Phone A without disabling the entire account.
+
+Design appropriate device/session tokens and expiration/revocation mechanisms.
+
+---
+
+# 5. Authentication and authorization
+
+Separate:
+
+**Authentication**
+from
+**Authorization**.
+
+The system must answer:
+
+1. Who is this user?
+2. Which mobile device are they using?
+3. Which gateway belongs to them?
+4. Is that gateway currently authorized?
+5. Is the user/device allowed to establish a connection?
+6. Is the gateway online?
+7. Is the requested session allowed?
+
+Do not trust the mobile application to make authorization decisions.
+
+All important authorization decisions must happen server-side.
+
+---
+
+# 6. Gateway lifecycle
+
+Design the gateway lifecycle:
+
+```text
+UNREGISTERED
+     ↓
+PAIRING
+     ↓
+REGISTERED
+     ↓
+ONLINE
+     ↓
+OFFLINE
+     ↓
+REVOKED
+```
+
+Support:
+
+* gateway registration
+* pairing
+* activation
+* heartbeat
+* online/offline detection
+* configuration retrieval
+* revocation
+* reactivation where appropriate
+* firmware/software version reporting
+
+The gateway should maintain an outbound connection to the server rather than requiring users to expose their home router directly to the internet.
+
+---
+
+# 7. Connection/session model
+
+Create a proper connection/session abstraction.
+
+Eventually the mobile application will request something like:
+
+```text
+CONNECT_TO_HOME_GATEWAY
+```
+
+The backend should:
+
+1. authenticate the user
+2. authenticate the mobile device
+3. identify the requested gateway
+4. verify ownership/authorization
+5. check gateway availability
+6. create a connection session
+7. generate appropriate session credentials/tokens
+8. coordinate the gateway and mobile client
+9. track session state
+10. terminate/revoke the session when required
+
+Define session states such as:
+
+```text
+REQUESTED
+AUTHORIZED
+CONNECTING
+CONNECTED
+DISCONNECTING
+DISCONNECTED
+FAILED
+EXPIRED
+REVOKED
+```
+
+Do not implement the actual VPN/tunnel technology yet unless needed for a minimal interface/prototype.
+
+Instead, create clean interfaces where a future WireGuard or other tunnel implementation can plug in.
+
+---
+
+# 8. NAT traversal / relay readiness
+
+The system must eventually support users behind:
+
+* NAT
+* CGNAT
+* dynamic public IP addresses
+* restrictive home routers
+
+Therefore, do NOT design the architecture around every gateway having a public IP.
+
+Create an abstraction for connection paths:
+
+```text
+DIRECT
+RELAY
+UNKNOWN
+```
+
+The eventual system should be able to attempt:
+
+Gateway ↔ Mobile
+
+directly where possible, and:
+
+Gateway ↔ Relay ↔ Mobile
+
+when direct connectivity is impossible.
+
+For now, implement the signalling/state model rather than the complete relay infrastructure.
+
+---
+
+# 9. Database
+
+Use a production-grade relational database such as PostgreSQL.
+
+Design normalized tables/entities for at least:
+
+* users
+* user_devices
+* gateways
+* gateway_credentials / identities
+* gateway_events
+* connection_sessions
+* session_events
+* subscriptions
+* audit_logs
+
+Add appropriate indexes.
+
+The schema should support large numbers of users and high-frequency gateway heartbeat/session events without becoming a bottleneck.
+
+Avoid storing sensitive secrets in plaintext.
+
+---
+
+# 10. API design
+
+Create versioned APIs.
+
+Use something like:
+
+```text
+/api/v1/auth/...
+/api/v1/users/...
+/api/v1/devices/...
+/api/v1/gateways/...
+/api/v1/connections/...
+/api/v1/sessions/...
+```
+
+Keep the API contract clean and documented.
+
+Prepare separate interfaces for:
+
+### Mobile clients
+
+Examples:
+
+```text
+POST /api/v1/auth/register
+POST /api/v1/auth/login
+GET  /api/v1/me
+GET  /api/v1/me/gateways
+POST /api/v1/connections
+DELETE /api/v1/connections/{id}
+```
+
+### Gateway clients
+
+Examples:
+
+```text
+POST /api/v1/gateways/register
+POST /api/v1/gateways/heartbeat
+GET  /api/v1/gateways/{id}/configuration
+POST /api/v1/gateways/{id}/events
+```
+
+These are examples only. Design the final API properly rather than blindly copying them.
+
+---
+
+# 11. Security
+
+Security is a first-class requirement.
+
+Implement foundations for:
+
+* TLS
+* secure password hashing
+* token expiration
+* token revocation
+* device-level authentication
+* gateway cryptographic identity
+* authorization checks
+* rate limiting
+* input validation
+* secure secrets management
+* audit logging
+* protection against replay attacks
+* protection against unauthorized gateway pairing
+* secure pairing flow
+* least-privilege access
+
+Never log:
+
+* passwords
+* private keys
+* authentication secrets
+* access tokens
+
+Design gateway pairing so that knowing a gateway ID alone is NOT sufficient to take ownership of the gateway.
+
+---
+
+# 12. Scalability
+
+Although this is initially an MVP, assume the system may eventually handle:
+
+* 10 users
+* 100 users
+* 1,000 users
+* 10,000 users
+* 100,000+ users
+
+Do not prematurely optimize, but avoid architecture that prevents scaling.
+
+Use:
+
+* stateless API servers where practical
+* PostgreSQL
+* Redis or equivalent where useful for ephemeral state
+* background job abstraction
+* connection/session state management
+* structured logging
+* health checks
+* metrics-ready architecture
+
+The API layer should be horizontally scalable.
+
+Do not store critical session state only in server memory.
+
+---
+
+# 13. Subscription-ready architecture
+
+We are NOT implementing billing yet.
+
+However, the data model should be prepared for future plans such as:
+
+* Free
+* Personal
+* Premium
+* Monthly
+* Annual
+
+and potentially later:
+
+* Day Pass
+* Traveller Pass
+* Business
+* Wi-Fi marketplace access
+
+Create subscription/entitlement abstractions without tying the connection engine directly to a particular payment provider.
+
+For example:
+
+```text
+User
+ ↓
+Subscription
+ ↓
+Entitlements
+ ↓
+Connection Authorization
+```
+
+This allows payment providers to change later without rewriting the connection system.
+
+---
+
+# 14. Future marketplace readiness
+
+V1 is for users accessing their own home gateway.
+
+V2 may introduce third-party connectivity providers.
+
+Therefore, do not hard-code the assumption:
+
+```text
+gateway.owner_id == current_user.id
+```
+
+throughout the entire codebase.
+
+Instead create an authorization/policy layer that can eventually support:
+
+```text
+PERSONAL_GATEWAY
+PARTNER_GATEWAY
+PUBLIC_HOTSPOT
+BUSINESS_GATEWAY
+```
+
+V1 can enforce personal ownership, while V2 can introduce provider-based access.
+
+---
+
+# 15. Administration
+
+Create basic administrative capabilities.
+
+An administrator should eventually be able to:
+
+* view users
+* view gateways
+* see gateway status
+* revoke gateways
+* revoke user devices
+* inspect sessions
+* view system health
+* view audit events
+
+Do not build a huge admin dashboard yet.
+
+Provide the backend foundation/API and a minimal administrative interface if appropriate.
+
+---
+
+# 16. Observability
+
+Build the system so that we can diagnose connectivity problems.
+
+Track:
+
+* API request metrics
+* gateway heartbeat status
+* connection attempts
+* successful connections
+* failed connections
+* session duration
+* disconnect reasons
+* authentication failures
+* gateway errors
+
+Use structured logs.
+
+Create:
+
+```text
+/health
+/ready
+```
+
+or equivalent endpoints.
+
+Prepare metrics integration without requiring a full monitoring stack during the first prototype.
+
+---
+
+# 17. Technology choice
+
+Choose a modern, maintainable backend stack.
+
+Prioritize:
+
+1. Security
+2. Networking support
+3. Maintainability
+4. Developer productivity
+5. Scalability
+6. Good PostgreSQL support
+7. WebSocket/real-time communication capability
+8. Good testing ecosystem
+
+Explain the technology choice before implementation.
+
+Containerize the application so it can be deployed consistently.
+
+Provide:
+
+* Dockerfile
+* docker-compose for local development
+* environment configuration
+* PostgreSQL
+* optional Redis
+* database migrations
+* seed/development data
+
+Never hard-code production credentials.
+
+---
+
+# 18. Documentation
+
+Produce clear documentation covering:
+
+### Architecture
+
+Explain every major component and why it exists.
+
+### Database
+
+Provide an ER diagram or equivalent description.
+
+### API
+
+Document endpoints, request/response structures and authentication.
+
+### Authentication
+
+Explain user, mobile-device and gateway authentication.
+
+### Gateway lifecycle
+
+Explain pairing, registration, heartbeat and revocation.
+
+### Connection lifecycle
+
+Explain the complete connection-session state machine.
+
+### Future tunnel integration
+
+Document where WireGuard/direct connection/relay functionality will be inserted later.
+
+### Scaling
+
+Explain how the architecture can scale horizontally.
+
+---
+
+# 19. Testing
+
+Create automated tests for at least:
+
+* user registration
+* login
+* device registration
+* gateway registration
+* gateway pairing
+* gateway authentication
+* gateway revocation
+* ownership authorization
+* unauthorized gateway access
+* connection creation
+* connection termination
+* expired sessions
+* revoked devices
+* offline gateways
+* concurrent sessions
+* rate limiting
+
+Include integration tests against PostgreSQL.
+
+Security-sensitive authorization paths must have explicit tests.
+
+---
+
+# 20. Important architectural principle
+
+The system should be built around this eventual flow:
+
+```text
+                    ODIVORA CLOUD
+                         │
+             ┌───────────┴───────────┐
+             │                       │
+        📱 MOBILE                 🏠 GATEWAY
+             │                       │
+             │                       │
+             └────── Secure Tunnel ──┘
+                         │
+                    Home Router
+                         │
+                      Home ISP
+                         │
+                     INTERNET
+```
+
+The cloud should primarily provide:
+
+**Identity + Authentication + Authorization + Coordination + Session Management**
+
+rather than becoming a permanent bottleneck through which all user internet traffic must pass.
+
+The eventual data path should preferably be:
+
+```text
+Phone ←──────────────→ Home Gateway
+          encrypted
+```
+
+with a relay used only when direct connectivity cannot be established.
+
+This is important for scalability and bandwidth economics.
+
+---
+
+# Deliverables
+
+At the end of this task, provide:
+
+1. Recommended architecture
+2. Technology stack and justification
+3. Project directory structure
+4. PostgreSQL schema/migrations
+5. Authentication foundation
+6. User/device/gateway models
+7. Gateway registration and pairing API
+8. Gateway heartbeat/status mechanism
+9. Connection/session API
+10. Authorization layer
+11. Subscription-ready entitlement model
+12. Docker development environment
+13. API documentation
+14. Automated tests
+15. Security considerations
+16. Deployment instructions
+17. Clear TODOs for the next phase
+
+## Most important constraint
+
+Do not build unnecessary V2 functionality now.
+
+Build a **clean, secure, modular foundation for V1**, but make the interfaces and data model extensible enough that V2 can later introduce Wi-Fi providers, traveller packages, partner ISPs, relay infrastructure, business accounts and a connectivity marketplace without rewriting the core architecture.
+
+The immediate success criterion is:
+
+**A future ESP32 Home Gateway and mobile application should be able to plug into this backend cleanly and securely.**

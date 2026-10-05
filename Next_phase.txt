@@ -1,0 +1,820 @@
+You are the lead networking/backend engineer continuing the **ODIVORA Home Connectivity** project.
+
+## Current status
+
+V1A is COMPLETE and has been tested with real ESP32 hardware.
+
+The following already works and MUST NOT be broken:
+
+* User authentication
+* User/device identity
+* Gateway registration
+* Gateway pairing/claiming
+* Gateway ownership
+* Gateway authentication
+* Gateway heartbeat
+* Online/offline state
+* Connection authorization
+* Session records/state machine
+* Existing REST APIs
+* Existing database schema/migrations
+* Existing automated tests
+
+The ESP32 successfully connected to the backend and pairing was completed successfully with real hardware.
+
+The existing backend is the **control plane**.
+
+---
+
+# Objective of V1B
+
+Build the first working **WireGuard data plane**.
+
+The goal is to prove this real scenario:
+
+```text
+             HOME
+
+TP-Link/Tenda Router
+        │
+        │ Ethernet
+        ▼
+Linux/OpenWrt Gateway
+        │
+        │ WireGuard
+        │
+        ▼
+   ODIVORA Cloud
+   (coordination only)
+        ▲
+        │
+        │ WireGuard
+        │
+    Mobile Client
+    outside home
+```
+
+The final desired traffic path is:
+
+```text
+Phone
+  │
+  │ encrypted WireGuard tunnel
+  ▼
+Home Gateway
+  │
+  ▼
+Home Router
+  │
+  ▼
+Home ISP
+  │
+  ▼
+Internet
+```
+
+**Normal user internet traffic MUST NOT pass through the ODIVORA application/API server.**
+
+The ODIVORA cloud remains primarily:
+
+* identity
+* authentication
+* authorization
+* gateway registry
+* session coordination
+* configuration/signalling
+* audit/usage metadata
+
+A relay may be introduced later as a fallback, but it is NOT part of the first direct-path implementation.
+
+---
+
+# Important architecture decision
+
+For this phase, **DO NOT use the ESP32 as the primary WireGuard/data-plane gateway**.
+
+Use a normal Linux machine or OpenWrt-capable device as the first real gateway.
+
+The development gateway should be capable of:
+
+* WireGuard
+* IP forwarding
+* NAT
+* firewalling
+* routing
+* DNS handling
+
+The ESP32 remains part of the existing control-plane experimentation and may later be integrated into the final hardware architecture.
+
+The first objective is to prove the networking architecture on capable Linux/OpenWrt hardware before optimizing for embedded hardware such as MT7981.
+
+---
+
+# 1. Preserve V1A
+
+Before changing anything:
+
+* inspect the existing repository
+* understand the current architecture
+* run the complete existing test suite
+* confirm V1A remains green
+* do NOT rewrite working authentication/pairing logic unnecessarily
+
+Create a clear separation between:
+
+```text
+CONTROL PLANE
+and
+DATA PLANE
+```
+
+Do not merge networking traffic into the existing REST API.
+
+---
+
+# 2. Choose WireGuard
+
+Use **WireGuard** as the tunnel technology.
+
+Do not implement a custom VPN protocol.
+
+Use standard WireGuard tooling/kernel support available on Linux/OpenWrt.
+
+The project should manage WireGuard configuration programmatically where appropriate.
+
+The eventual architecture should support:
+
+```text
+PHONE/WIREGUARD PEER
+        ↕
+HOME GATEWAY/WIREGUARD PEER
+```
+
+The ODIVORA backend coordinates the relationship but does not proxy normal data traffic.
+
+---
+
+# 3. Gateway abstraction
+
+Create a gateway data-plane abstraction so we can later support:
+
+* Linux gateway
+* OpenWrt gateway
+* MT7981-based ODIVORA Home Key
+* potentially other gateway hardware
+
+Do not hard-code the networking layer to one Linux command or one hardware platform.
+
+Conceptually:
+
+```text
+Gateway
+ ├── identity
+ ├── control-plane connection
+ ├── tunnel capability
+ ├── WireGuard public key
+ ├── tunnel address
+ ├── data-plane status
+ └── software/firmware version
+```
+
+---
+
+# 4. WireGuard identity
+
+Each gateway should have a WireGuard keypair.
+
+Private keys MUST:
+
+* never be sent to the cloud
+* never be stored in plaintext in backend logs
+* never be exposed through normal API responses
+* remain local to the gateway
+
+The cloud may store the gateway's:
+
+* public key
+* tunnel IP/address assignment
+* metadata
+* peer state
+
+The mobile client should also generate/manage its own WireGuard identity securely.
+
+---
+
+# 5. Session authorization
+
+Use the existing V1A connection authorization mechanism.
+
+The flow should become:
+
+```text
+Phone
+  │
+  │ request connection
+  ▼
+ODIVORA Cloud
+  │
+  ├── authenticate user
+  ├── authenticate device
+  ├── verify gateway ownership/grant
+  ├── verify gateway online
+  ├── verify subscription/entitlement
+  ├── verify session limits
+  │
+  ▼
+Create authorized session
+  │
+  ▼
+Issue short-lived tunnel/session configuration
+```
+
+Do not let the mobile client independently decide whether it is allowed to access a gateway.
+
+The backend remains the authority.
+
+---
+
+# 6. Dynamic WireGuard peer configuration
+
+Implement the minimum mechanism required to authorize a phone as a WireGuard peer for its selected gateway.
+
+The exact implementation may use:
+
+* backend-generated peer configuration
+* short-lived session credentials
+* gateway synchronization
+* configuration polling
+* WebSocket signalling
+* another secure mechanism
+
+Choose the cleanest architecture.
+
+Do not expose private gateway keys.
+
+Do not create permanent peers for every user if temporary session peers are more appropriate.
+
+Consider:
+
+* peer expiration
+* session termination
+* revocation
+* reconnect
+* device revocation
+* gateway revocation
+
+---
+
+# 7. Tunnel IP addressing
+
+Design a private tunnel address scheme.
+
+For example:
+
+```text
+10.x.x.x/...
+```
+
+or another appropriate private range.
+
+The system must prevent:
+
+* address collisions
+* two users receiving the same active tunnel address
+* one user accessing another user's gateway without authorization
+
+Do not hard-code one IP for all users.
+
+Create an allocation abstraction that can later scale to many gateways/users.
+
+---
+
+# 8. Gateway routing
+
+Configure the Linux/OpenWrt gateway so traffic coming from the WireGuard interface can reach the home LAN and/or internet through the existing home router.
+
+The desired path is:
+
+```text
+WireGuard interface
+       ↓
+Gateway routing
+       ↓
+Home LAN / WAN interface
+       ↓
+Existing router
+       ↓
+Home ISP
+```
+
+The customer's existing TP-Link/Tenda router should NOT need:
+
+* WireGuard configuration
+* port forwarding
+* DDNS
+* special VPN setup
+
+For the initial prototype, the gateway simply connects to the existing router using Ethernet/DHCP.
+
+---
+
+# 9. Internet egress / NAT
+
+Configure the gateway so that remote tunnel traffic can be NATed toward the existing home router when required.
+
+The final behavior should be:
+
+```text
+Remote phone
+   ↓
+WireGuard
+   ↓
+ODIVORA Gateway
+   ↓
+NAT
+   ↓
+Home Router
+   ↓
+Home ISP
+```
+
+The home router should see the gateway as a normal LAN device.
+
+Do not require changes to the customer's existing router for this phase.
+
+---
+
+# 10. Split tunnel vs full tunnel
+
+Implement configuration support for both concepts, but prioritize **full-tunnel internet access** for the first demonstration.
+
+Full tunnel:
+
+```text
+Phone
+  ↓
+WireGuard
+  ↓
+Home Gateway
+  ↓
+Home Internet
+```
+
+The mobile client's internet traffic should exit through the home ISP.
+
+Later we can support:
+
+* LAN-only access
+* split tunnel
+* configurable routes
+
+But the first success criterion is full internet egress through home.
+
+---
+
+# 11. DNS
+
+Handle DNS deliberately.
+
+Avoid accidentally leaking DNS outside the tunnel when full-tunnel mode is enabled.
+
+The first implementation may use:
+
+* home DNS
+* a configured DNS resolver
+* a secure resolver reachable through the tunnel
+
+Document the choice.
+
+The mobile client should be able to verify whether DNS requests are following the intended path.
+
+---
+
+# 12. NAT / CGNAT
+
+The first data-plane implementation should NOT assume that the home gateway has a public IP.
+
+The home gateway should establish its control-plane connection outbound.
+
+For the first data-plane experiment, use the simplest reliable WireGuard coordination strategy possible.
+
+Do NOT build a relay yet unless necessary for the basic test.
+
+However, design the interfaces so that a future connection path can be:
+
+```text
+DIRECT
+or
+RELAY
+```
+
+without rewriting the session model.
+
+---
+
+# 13. Relay architecture — future-ready only
+
+Do not build full relay infrastructure in this phase.
+
+Create only the abstraction/documentation necessary for:
+
+```text
+Phone ←──── DIRECT ────→ Gateway
+```
+
+and later:
+
+```text
+Phone ←── Relay ──→ Gateway
+```
+
+The relay must eventually carry encrypted WireGuard traffic without becoming the termination point for user traffic.
+
+For now, mark relay functionality as TODO.
+
+---
+
+# 14. Connection state
+
+Extend the existing session state machine carefully.
+
+Existing states:
+
+```text
+REQUESTED
+AUTHORIZED
+CONNECTING
+CONNECTED
+DISCONNECTING
+DISCONNECTED
+FAILED
+EXPIRED
+REVOKED
+```
+
+Clarify that:
+
+**CONNECTED in V1B means the WireGuard/data-plane tunnel has actually been established**, unlike the control-plane-only interpretation used during V1A.
+
+Add useful metadata such as:
+
+* tunnel establishment timestamp
+* gateway public key
+* peer public key
+* tunnel address
+* data-plane status
+* disconnect reason
+
+Do not store private keys.
+
+---
+
+# 15. Actual success test
+
+The most important acceptance test is NOT merely:
+
+```text
+API → 200 OK
+```
+
+The real test is:
+
+```text
+PHONE OUTSIDE HOME
+        ↓
+ODIVORA AUTHORIZATION
+        ↓
+WIREGUARD
+        ↓
+HOME GATEWAY
+        ↓
+HOME ROUTER
+        ↓
+HOME ISP
+        ↓
+PUBLIC INTERNET
+```
+
+Then verify that the public internet sees the **home connection's public IP** rather than the phone's normal mobile-data IP.
+
+For example:
+
+```text
+Before:
+Phone public IP = X
+
+After connecting to ODIVORA Home:
+Phone public IP = Y
+
+Y must correspond to the home ISP connection.
+```
+
+Do not hard-code expected IP values.
+
+---
+
+# 16. Performance benchmarking
+
+Build a repeatable benchmark procedure.
+
+Measure:
+
+* baseline ping from phone
+* tunnel ping
+* baseline download
+* tunnel download
+* baseline upload
+* tunnel upload
+* jitter
+* packet loss
+* tunnel establishment time
+* gateway CPU
+* gateway RAM
+* gateway temperature where available
+* sustained throughput
+
+Run at least:
+
+1. phone directly on mobile data
+2. phone through ODIVORA home tunnel
+3. optionally local LAN baseline
+
+Document results.
+
+Do not present illustrative numbers as measurements.
+
+---
+
+# 17. Gateway hardware independence
+
+The test gateway should initially run on:
+
+**Linux or OpenWrt**
+
+Possible test platforms:
+
+* Ubuntu Linux
+* Debian Linux
+* OpenWrt x86-64
+* an existing OpenWrt router
+
+The implementation must avoid unnecessary dependence on x86-specific behavior.
+
+The longer-term hardware targets are:
+
+* MT7981-based gateway
+* MT7986-based gateway
+* other OpenWrt-capable embedded hardware
+
+Do not design around Raspberry Pi-specific functionality.
+
+---
+
+# 18. Mobile test client
+
+For the first test, a full native mobile application is NOT required.
+
+A test client may be:
+
+* WireGuard mobile application
+* command-line/API tool
+* generated WireGuard configuration
+* simple temporary test interface
+
+However, structure the API so the future ODIVORA mobile application can consume the same endpoints unchanged.
+
+The final UX should eventually become:
+
+```text
+ODIVORA HOME
+
+Gateway: Online
+
+[ CONNECT ]
+
+Status:
+Connected through Home
+```
+
+But UX polish is not the goal of V1B.
+
+---
+
+# 19. Security requirements
+
+Treat WireGuard configuration and credentials as sensitive.
+
+Do NOT:
+
+* send private keys to the backend
+* log private keys
+* expose private keys through debugging APIs
+* create unauthenticated gateway peers
+* allow arbitrary user-selected gateways
+* trust client-supplied ownership
+* bypass existing authorization
+* disable TLS
+* disable authentication for convenience
+
+Use short-lived session authorization where practical.
+
+Ensure disconnect/revocation removes or invalidates the relevant peer.
+
+---
+
+# 20. Logging and observability
+
+Record useful control-plane events such as:
+
+```text
+tunnel_requested
+tunnel_authorized
+peer_created
+peer_provisioned
+tunnel_connected
+tunnel_failed
+tunnel_disconnected
+peer_revoked
+```
+
+Do NOT log:
+
+* private keys
+* authentication tokens
+* sensitive tunnel secrets
+
+Expose metrics where practical.
+
+Do not introduce Prometheus as a mandatory dependency yet.
+
+---
+
+# 21. Testing
+
+Add automated tests for:
+
+### Authorization
+
+* authorized owner → allowed
+* unauthorized user → denied
+* revoked device → denied
+* revoked gateway → denied
+* offline gateway → denied
+* expired subscription → denied
+* session limit → denied
+
+### WireGuard configuration
+
+* valid peer generated
+* invalid peer rejected
+* duplicate peer prevented
+* peer removed on disconnect/revoke
+* expired session invalidated
+
+### Network
+
+At least one real integration test must prove:
+
+```text
+WireGuard peer
+     ↓
+Gateway
+     ↓
+Home LAN
+     ↓
+Router
+```
+
+And a manual end-to-end test must prove:
+
+```text
+Remote phone
+     ↓
+WireGuard
+     ↓
+Home gateway
+     ↓
+Home ISP
+     ↓
+Public IP = home IP
+```
+
+---
+
+# 22. Keep the cloud out of the data path
+
+This is a core architectural requirement.
+
+The backend API must NOT become:
+
+```text
+Phone → Backend → Internet
+```
+
+or:
+
+```text
+Phone → Backend → Gateway
+```
+
+for ordinary customer traffic.
+
+Instead:
+
+```text
+Phone ═════════════ Gateway
+          WireGuard
+```
+
+The cloud performs:
+
+```text
+Authentication
+Authorization
+Coordination
+Session management
+Metadata
+```
+
+not normal traffic forwarding.
+
+This is critical for scalability and cloud bandwidth cost.
+
+---
+
+# 23. Deliverables
+
+At the end of the implementation, provide:
+
+1. Updated architecture diagram
+2. WireGuard architecture/design
+3. Gateway setup instructions for Linux
+4. Gateway setup instructions for OpenWrt where practical
+5. API changes
+6. Database migration(s), if required
+7. Mobile/test-client configuration flow
+8. Tunnel/session lifecycle
+9. NAT/routing configuration
+10. DNS configuration
+11. Automated tests
+12. End-to-end test procedure
+13. Performance benchmark procedure
+14. Security review
+15. Rollback instructions
+16. TODO for relay/CGNAT improvements
+17. TODO for MT7981 hardware
+18. Clear documentation explaining which components are temporary development components
+
+---
+
+# Definition of DONE
+
+V1B is complete only when we can demonstrate this with real equipment:
+
+```text
+                HOME
+
+       TP-Link/Tenda Router
+                │
+             Ethernet
+                │
+                ▼
+         Linux/OpenWrt
+            Gateway
+                │
+                │ WireGuard
+                │
+                ▼
+
+            INTERNET
+
+                ▲
+                │
+                │ WireGuard
+                │
+                ▼
+
+       Phone outside home
+       on mobile data/
+       different Wi-Fi
+```
+
+The phone must:
+
+1. Authenticate to ODIVORA.
+2. Request its own authorized gateway.
+3. Receive authorized tunnel configuration.
+4. Establish a real WireGuard tunnel.
+5. Route internet traffic through the home gateway.
+6. Reach the public internet.
+7. Show the home's public IP as the egress IP.
+8. Disconnect cleanly.
+9. Lose access when the session/device/gateway is revoked.
+
+Do not move to commercial billing or marketplace features until this end-to-end data-plane test is working reliably.
+
+## Guiding principle
+
+**V1A proved identity and authorization. V1B must prove actual connectivity.**
+
+Use proven WireGuard and Linux/OpenWrt networking components. Do not invent a custom VPN protocol or custom cryptography.

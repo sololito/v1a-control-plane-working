@@ -1,0 +1,9 @@
+global:
+  scrape_interval: 30s
+scrape_configs:
+  - job_name: odivora-home
+    static_configs:
+      - targets: ["api:8000"]
+    metrics_path: /metrics/prometheus
+rule_files:
+  - alert_rules.yml

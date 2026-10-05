@@ -1,0 +1,25 @@
+groups:
+  - name: odivora-home-connectivity
+    interval: 1m
+    rules:
+      - alert: GatewayOfflineHigh
+        expr: odivora_gateways_offline > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Many gateways offline ({{ $value }})"
+      - alert: SessionsFailedSpike
+        expr: odivora_sessions_failed_recent > 10
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Failed-session spike ({{ $value }} in 60m)"
+      - alert: NoGatewaysOnline
+        expr: odivora_gateways_online == 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "No gateways online for 10m"

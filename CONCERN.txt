@@ -1,0 +1,66 @@
+Review the current ODIVORA V1B WireGuard architecture and fix the networking assumption that a home gateway behind NAT/CGNAT can be reached remotely using WireGuard with only outbound HTTPS to the cloud.
+
+The current design says:
+
+```text
+Phone ↔ WireGuard ↔ Home Gateway
+```
+
+while both peers may be behind NAT/CGNAT and neither has a directly reachable public UDP endpoint.
+
+### Required changes
+
+1. Keep the ODIVORA cloud as the **control plane only**. It must not proxy normal user internet traffic.
+
+2. Add a proper **NAT-traversal/direct-connect mechanism** so the gateway and phone can establish a WireGuard data path when possible.
+
+3. Add a **relay fallback** for cases where direct peer-to-peer connectivity cannot be established.
+
+4. Model connection paths explicitly as:
+
+```text
+DIRECT
+RELAY
+FAILED
+```
+
+5. The relay must carry encrypted WireGuard traffic without terminating/decrypting the user's tunnel traffic.
+
+6. The home gateway must still require:
+
+   * no port forwarding
+   * no static public IP
+   * no DDNS
+   * no special configuration on the TP-Link/Tenda router
+
+7. Preserve the existing V1A authentication, pairing, ownership, authorization and session APIs.
+
+8. Update the V1B architecture, API contracts, gateway agent and documentation accordingly.
+
+9. For the first implementation, prioritize **reliable connectivity over optimization**, but keep the design scalable and avoid making the ODIVORA API server a permanent traffic relay.
+
+### Acceptance test
+
+A gateway behind an ordinary TP-Link/Tenda NAT and a phone on mobile data must be able to:
+
+```text
+Phone
+  ↓
+ODIVORA authorization
+  ↓
+Direct WireGuard connection if possible
+  OR
+Relay fallback
+  ↓
+Home Gateway
+  ↓
+Home Router
+  ↓
+Home ISP
+  ↓
+Internet
+```
+
+The phone must ultimately browse the internet through the home ISP, and the gateway must work without inbound port forwarding.
+
+Do not redesign V1A unnecessarily. Make the smallest architectural changes required to make V1B networking actually work.

@@ -1,0 +1,8 @@
+python -m venv .venv; .\.venv\Scripts\Activate
+pip install -r requirements.txt
+copy .env.example .env  2>nul || echo .env.example not found
+python -m scripts.seed
+python run_server.py  # Runs on all network interfaces so accessible via your IP (e.g., http://192.168.1.50:8000)
+
+Email: admin@example.com
+Password: Admin12345!

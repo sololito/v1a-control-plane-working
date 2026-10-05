@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+
+# Env & secrets
+.env
+*.env
+!.env.example
+
+# Databases & runtime
+*.db
+*.sqlite3
+odivora_home.db
+test_*.db
+
+# Logs
+*.log
+server_smoke*.log
+
+# Node/OS
+node_modules/
+.DS_Store
+Thumbs.db
+
+# pytest
+.pytest_cache/
+
+# Local tooling
+.vscode/
+.idea/
