@@ -62,4 +62,27 @@ def check_rate(scope: str, key: str, limit: int, window_s: int = 60):
 
 
 def client_ip(request: Request) -> str:
-    return request.client.host if request.client else "anon"
+    """Best-effort real client address for audit logs and rate-limit keys.
+
+    Behind a reverse proxy the socket peer is the proxy itself, so the LAST
+    X-Forwarded-For entry is taken: that is the one the trusted proxy appended,
+    whereas earlier entries are client-controlled and forgeable.
+
+    Never raises — callers use it on the error path too (failed logins), so a
+    malformed or peer-less request must still yield a usable string.
+    """
+    try:
+        headers = getattr(request, "headers", None)
+        if headers is not None and get_settings().trust_proxy_headers:
+            xff = headers.get("x-forwarded-for")
+            if xff:
+                hops = [h.strip() for h in xff.split(",") if h.strip()]
+                if hops:
+                    return hops[-1][:64]
+            fwd = headers.get("x-real-ip")
+            if fwd:
+                return fwd.strip()[:64]
+    except Exception:
+        pass
+    client = getattr(request, "client", None)
+    return client.host if client else "anon"

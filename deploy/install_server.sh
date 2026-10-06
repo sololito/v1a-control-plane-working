@@ -25,16 +25,20 @@ if [ -f odivora_home.db ] || grep -q 'sqlite' .env; then
     ./venv/bin/python - "$f" <<'PY'
 import sqlite3, sys
 c = sqlite3.connect("odivora_home.db")
-ok = 0
+ok, skipped = 0, 0
 for line in open(sys.argv[1]):
     s = line.strip()
-    if s.startswith(("ALTER", "CREATE")):
+    # Data migrations (e.g. purging leaked secrets) are UPDATE statements, so
+    # they must run too - skipping them silently keeps the secrets in place.
+    if s.startswith(("ALTER", "CREATE", "UPDATE")):
         try:
             c.execute(s.rstrip(";")); ok += 1
-        except Exception:
-            pass
+        except Exception as e:
+            # Re-running a migration is normal (columns may already exist).
+            skipped += 1
+            print(f"  skip: {s[:60]}... ({e})")
 c.commit()
-print(f"applied {ok} statements")
+print(f"applied {ok} statements ({skipped} skipped)")
 PY
   done
 fi

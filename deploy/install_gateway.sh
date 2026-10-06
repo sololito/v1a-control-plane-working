@@ -3,12 +3,26 @@
 set -euo pipefail
 
 REPO_DIR=${REPO_DIR:-/opt/odivora}
-WAN_IFACE=${WAN_IFACE:-eth0}
+
+# Autodetect the uplink: interface names vary (eth0/enp0s31f6/ens18/...).
+# Defaulting to eth0 makes NAT silently never match.
+WAN_IFACE=${WAN_IFACE:-$(ip -o route show default | awk '{for(i=1;i<=NF;i++) if($i=="dev") print $(i+1); exit}')}
+if [ -z "${WAN_IFACE}" ]; then
+  echo "Could not detect a default-route interface; set WAN_IFACE=... explicitly" >&2
+  exit 1
+fi
+echo "Detected WAN interface: ${WAN_IFACE}"
 
 sudo apt-get update
 sudo apt-get install -y wireguard-tools python3 python3-venv iptables
-sudo sysctl -w net.ipv4.ip_forward=1
-echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
+
+# Persist forwarding without appending a duplicate line on every run.
+if ! sysctl -n net.ipv4.ip_forward | grep -qx 1; then
+  sudo sysctl -w net.ipv4.ip_forward=1
+fi
+if ! grep -qx 'net.ipv4.ip_forward=1' /etc/sysctl.conf; then
+  echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
+fi
 
 cd "$REPO_DIR"
 python3 -m venv venv

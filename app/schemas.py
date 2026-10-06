@@ -10,12 +10,17 @@ class RegisterRequest(BaseModel):
     password: str = Field(min_length=10, max_length=128)
     display_name: Optional[str] = Field(default=None, max_length=120)
     device_name: str = Field(default="phone", max_length=80)
+    # Optional device forensics at first install (see /me/device-identity).
+    imei: Optional[str] = Field(default=None, max_length=32)
+    mac_address: Optional[str] = Field(default=None, max_length=32)
 
 
 class LoginRequest(BaseModel):
     email: EmailStr
     password: str = Field(min_length=1, max_length=128)
     device_name: str = Field(default="phone", max_length=80)
+    imei: Optional[str] = Field(default=None, max_length=32)
+    mac_address: Optional[str] = Field(default=None, max_length=32)
 
 
 class TokenResponse(BaseModel):
@@ -83,6 +88,11 @@ class HeartbeatRequest(BaseModel):
     health: Optional[Dict[str, Any]] = None
     ip_hint: Optional[str] = Field(default=None, max_length=64)
     nonce: Optional[str] = Field(default=None, max_length=80)
+    # Public WireGuard endpoint (host:port) this gateway can be reached on,
+    # e.g. when UDP 51820 is port-forwarded from the home router. Advertising
+    # it is what lets sessions use connection_path="direct"; without it the
+    # gateway is treated as behind NAT and gets a relay pair instead.
+    wg_endpoint: Optional[str] = Field(default=None, max_length=128)
 
 
 class GatewayEventIn(BaseModel):
@@ -112,3 +122,27 @@ class SubscriptionOut(BaseModel):
     entitlements: Optional[Dict[str, Any]] = None
     class Config:
         from_attributes = True
+
+
+class DeviceIdentityIn(BaseModel):
+    """Device fingerprint reported by the mobile app.
+
+    `ip_address` is deliberately absent: the server derives it from the
+    request so a client cannot log a false address for itself.
+    """
+    imei: Optional[str] = Field(default=None, max_length=32)
+    mac_address: Optional[str] = Field(default=None, max_length=32)
+    device_name: Optional[str] = Field(default=None, max_length=80)
+    device_type: Optional[str] = Field(default=None, max_length=40)
+    user_agent: Optional[str] = Field(default=None, max_length=255)
+
+
+class VisitsIn(BaseModel):
+    """First destinations reached through a live tunnel session.
+
+    Only the first `settings.visit_site_limit` (10) entries of a session are
+    stored; later reports are accepted but not persisted.
+    """
+    session_id: UUID
+    sites: List[str] = Field(default_factory=list, max_length=50)
+

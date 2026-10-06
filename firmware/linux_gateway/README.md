@@ -80,9 +80,28 @@ The script will:
    ```
 
 3. take the `gateway_token` from the claim response,
-4. take your **user access token** and call
-   `POST /gateways/<id>/generate-keys` — it writes the WireGuard private
-   key to `/etc/odivora/wg_private_key` (`chmod 600`),
+4. generate the WireGuard keypair **on the device** and register only the
+   public half:
+
+   ```bash
+   ./venv/bin/python -c "
+   from app.gateway.keypair import generate_wg_keypair, store_wg_private_key_locally
+   k = generate_wg_keypair()
+   store_wg_private_key_locally(k['private_key'])
+   print(k['public_key'])"
+   ```
+
+   then upload the printed public key with the gateway token:
+
+   ```bash
+   curl -X POST http://<API_IP>:8000/api/v1/gateways/<ID>/wg-public-key \
+     -H "Authorization: Bearer <gateway_token>" \
+     -H "Content-Type: application/json" \
+     -d '{"wg_public_key": "<PUBLIC_KEY>"}'
+   ```
+
+   The private key stays in `/etc/odivora/wg_private_key` (`chmod 600`) and is
+   never transmitted. `setup_gateway.py` does all of this automatically.
 5. write `/etc/odivora/gateway.env` (API base, gateway id/token,
    interface names, sync interval).
 

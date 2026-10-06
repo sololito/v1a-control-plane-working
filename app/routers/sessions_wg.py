@@ -33,6 +33,7 @@ from app import models
 from app.db import get_db
 from app.deps import get_current_user_device
 from app.gateway.ip_alloc import allocate_tunnel_ip, gateway_tunnel_ip, gateway_tunnel_network
+from app.ratelimit import client_ip
 
 router = APIRouter(tags=["sessions-wg"])
 
@@ -192,8 +193,20 @@ def authorize_wg_peer(
         session.connection_path = "direct"
         session.relay_info = None
     else:
+        # Fail before mutating/persisting anything if the relay will not
+        # confirm the port pair. Committing a session whose ports are not
+        # bound hands the phone an endpoint that can never answer, and the
+        # failure would only surface as a handshake timeout much later.
+        from app.relay import RelayUnavailable, alloc_relay_session
+        try:
+            session.relay_info = json.dumps(alloc_relay_session(str(session.id)))
+        except RelayUnavailable as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Tunnel relay is unavailable; retry shortly. "
+                       f"({exc})",
+            )
         session.connection_path = "relay"
-        session.relay_info = json.dumps(alloc_relay_session(str(session.id)))
 
     db.add(session)
     db.add(gateway)
@@ -204,6 +217,7 @@ def authorize_wg_peer(
     db.add(models.AuditLog(
         actor_type="user", actor_id=str(user.id), action="tunnel_authorized",
         resource_type="connection_session", resource_id=str(session.id),
+        ip=client_ip(request),
     ))
     db.commit()
     db.refresh(session)
@@ -326,6 +340,11 @@ def wg_handshake_confirm(
         session_id=session.id, event="tunnel_connected",
         detail=json.dumps({"handshake_at": session.wg_handshake_at.isoformat()}),
     ))
+    db.add(models.AuditLog(
+        actor_type="user", actor_id=str(user.id), action="tunnel_connected",
+        resource_type="connection_session", resource_id=str(session.id),
+        ip=client_ip(request),
+    ))
     if gateway:
         gateway.wg_last_handshake_at = session.wg_handshake_at
         gateway.wg_status = "online"
@@ -389,6 +408,7 @@ def revoke_wg_peer(
     db.add(models.AuditLog(
         actor_type="user", actor_id=str(user.id), action="peer_revoked",
         resource_type="connection_session", resource_id=str(session.id),
+        ip=client_ip(request),
     ))
     db.commit()
     db.refresh(session)

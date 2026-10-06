@@ -67,6 +67,15 @@ class UserDevice(Base):
     refresh_prev_hash = Column(String(255), nullable=True)  # 30s grace for concurrent refresh
     refresh_prev_at = Column(DateTime, nullable=True)
     last_seen = Column(DateTime, nullable=True)
+    # --- Device fingerprint for the audit trail (client-declared where noted) ---
+    # ip_address is server-observed (X-Forwarded-For aware), never client-claimed.
+    ip_address = Column(String(64), nullable=True)
+    # IMEI/MAC are only reachable by a native app (OS APIs); they arrive through
+    # POST /me/device-identity and are unverified self-reported identifiers.
+    imei = Column(String(32), nullable=True)
+    mac_address = Column(String(32), nullable=True)
+    user_agent = Column(String(255), nullable=True)
+    identity_updated_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
     revoked_at = Column(DateTime, nullable=True)
 
@@ -85,11 +94,13 @@ class Gateway(Base):
     last_nonce = Column(String(80), nullable=True)  # replay protection, monotonic per gateway
     public_key = Column(Text, nullable=True)  # Ed25519 gateway identity (V1A)
     # --- WireGuard data-plane fields (V1B) ---
-    wg_private_key = Column(String(512), nullable=True)  # !!! PRIVATE KEY - NEVER sent to cloud/API/logs
-    # Stored on gateway device only (Linux /etc/wireguard/, OpenWrt NVRAM, etc.)
-    # Application must NEVER expose this field in API responses or debugging output.
-    wg_public_key = Column(String(44), nullable=True)  # Public key - CAN be sent to backend for coordination
-    # WireGuard format: base64-encoded 255-bit key, no PEM headers (44 chars typical)
+    # NOTE: there is deliberately NO wg_private_key column. The gateway
+    # generates its X25519 keypair locally and keeps the private half in local
+    # storage; only the public half is ever registered with this service (see
+    # POST /gateways/{id}/wg-public-key). The column was removed in migration
+    # 006 after it was found to persist gateway private keys in the database.
+    wg_public_key = Column(String(44), nullable=True)  # Public key - safe to store and share
+    # WireGuard format: base64-encoded 255-bit key (44 chars incl. '=' padding)
     wg_listen_port = Column(Integer, default=51820)  # Default WireGuard listen port
     wg_status = Column(String(20), default="offline")  # offline|online|handshaking|error
     wg_last_handshake_at = Column(DateTime, nullable=True)  # Timestamp of last WG handshake
@@ -179,6 +190,29 @@ class SessionEvent(Base):
     created_at = Column(DateTime, default=utcnow, nullable=False)
 
 
+class DeviceVisit(Base):
+    """First N destinations a device reached while a tunnel session was live.
+
+    Populated by the mobile client (POST /me/visits) — the cloud never sees
+    plaintext traffic inside a WireGuard tunnel, so the app reports it. `rank`
+    is the 1-based order of arrival and is capped at VISIT_SITE_LIMIT per
+    (device, session): only the FIRST ten sites are ever kept.
+    """
+    __tablename__ = "device_visits"
+    id = Column(GUID(), primary_key=True, default=new_uuid)
+    user_id = Column(GUID(), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    device_id = Column(GUID(), ForeignKey("user_devices.id", ondelete="SET NULL"), nullable=True)
+    session_id = Column(GUID(), ForeignKey("connection_sessions.id", ondelete="CASCADE"),
+                        nullable=False)
+    gateway_id = Column(GUID(), ForeignKey("gateways.id", ondelete="CASCADE"), nullable=False)
+    rank = Column(Integer, nullable=False)  # 1..VISIT_SITE_LIMIT
+    host = Column(String(255), nullable=False)  # normalized host/site visited
+    url = Column(Text, nullable=True)
+    client_ip = Column(String(64), nullable=True)
+    visited_at = Column(DateTime, default=utcnow, nullable=False)
+    created_at = Column(DateTime, default=utcnow, nullable=False)
+
+
 class Subscription(Base):
     __tablename__ = "subscriptions"
     id = Column(GUID(), primary_key=True, default=new_uuid)
@@ -230,3 +264,7 @@ Index("ix_gateway_owner", Gateway.owner_user_id)
 Index("ix_session_gateway_status", ConnectionSession.gateway_id, ConnectionSession.status)
 Index("ix_session_user", ConnectionSession.user_id)
 Index("ix_audit_action", AuditLog.action)
+Index("ix_audit_resource", AuditLog.resource_type, AuditLog.resource_id)
+Index("ix_visit_session", DeviceVisit.session_id, DeviceVisit.rank)
+Index("ix_visit_gateway", DeviceVisit.gateway_id)
+Index("ix_device_user", UserDevice.user_id, UserDevice.status)

@@ -61,6 +61,17 @@ def ed_keys():
     return priv, base64.b64encode(raw).decode()
 
 
+def register_wg_pubkey(gtok, gid):
+    """Device-side key registration: gateway uploads only its public half."""
+    from app.gateway.keypair import generate_wg_keypair
+    keys = generate_wg_keypair()
+    r = c.post(f"/api/v1/gateways/{gid}/wg-public-key",
+               json={"wg_public_key": keys["public_key"]},
+               headers={"Authorization": f"Bearer {gtok}"})
+    assert r.status_code == 200, r.text
+    return keys
+
+
 def make_online_gateway(email):
     t = reg(email)
     h = {"Authorization": f"Bearer {t['access_token']}"}
@@ -71,8 +82,7 @@ def make_online_gateway(email):
                   json={"pairing_code": code}, headers=h).json()["gateway_token"]
     c.post("/api/v1/gateways/heartbeat", json={},
            headers={"Authorization": f"Bearer {gtok}"})
-    r = c.post(f"/api/v1/gateways/{gid}/generate-keys", headers=h)
-    assert r.status_code == 200, r.text
+    register_wg_pubkey(gtok, gid)
     return h, gid
 
 
@@ -187,3 +197,65 @@ def test_gateway_tunnel_ip_set_and_subnet_consistent():
     assert r["assigned_ip"] != gateway_tunnel_ip(gid)  # peer never gets gateway IP
     net = gateway_tunnel_network(gid)
     assert r["assigned_ip"] in [str(ip) for ip in net.hosts()]
+
+
+def test_wg_endpoint_advertised_via_heartbeat():
+    """A gateway must be able to declare its public endpoint to get direct paths."""
+    import json
+    t = reg("endpoint@example.com")
+    h = {"Authorization": f"Bearer {t['access_token']}"}
+    priv, pub_b64 = ed_keys()
+    r = c.post("/api/v1/gateways/register", json={"device_type": "linux", "public_key": pub_b64})
+    gid, code = r.json()["gateway_id"], r.json()["pairing_code"]
+    gtok = c.post(f"/api/v1/me/gateways/{gid}/claim",
+                  json={"pairing_code": code}, headers=h).json()["gateway_token"]
+    gh = {"Authorization": f"Bearer {gtok}"}
+
+    def meta():
+        from app import models
+        db = TestingSession()
+        try:
+            return db.query(models.Gateway).filter(models.Gateway.id == gid).first().ip_metadata
+        finally:
+            db.close()
+
+    ok = c.post("/api/v1/gateways/heartbeat",
+                json={"nonce": "0000000001", "wg_endpoint": "203.0.113.7:51820"}, headers=gh)
+    assert ok.status_code == 200, ok.text
+    assert json.loads(meta()).get("wg_endpoint") == "203.0.113.7:51820", meta()
+
+    bad = c.post("/api/v1/gateways/heartbeat",
+                 json={"nonce": "0000000002", "wg_endpoint": "not-an-endpoint"}, headers=gh)
+    assert bad.status_code == 422, bad.text
+
+    # ip_hint must survive a later endpoint update (metadata is merged).
+    c.post("/api/v1/gateways/heartbeat",
+           json={"nonce": "0000000003", "ip_hint": "198.51.100.9"}, headers=gh)
+    c.post("/api/v1/gateways/heartbeat",
+           json={"nonce": "0000000004", "wg_endpoint": "203.0.113.7:51821"}, headers=gh)
+    m = json.loads(meta())
+    assert m.get("ip_hint") == "198.51.100.9", m
+    assert m.get("wg_endpoint") == "203.0.113.7:51821", m
+
+    # Clearing the endpoint puts the gateway back on the relay path.
+    c.post("/api/v1/gateways/heartbeat",
+           json={"nonce": "0000000005", "wg_endpoint": ""}, headers=gh)
+    assert "wg_endpoint" not in json.loads(meta()), meta()
+
+
+def test_direct_path_rejected_without_declared_endpoint():
+    """Explicit `direct` without a declared endpoint must 409, not fake a tunnel."""
+    h, gid = make_online_gateway("behind-nat@example.com")
+    r = c.post("/api/v1/connections", json={"gateway_id": gid, "connection_path": "direct"}, headers=h)
+    s1 = r.json()["id"]
+    resp = c.post(f"/api/v1/sessions/{s1}/authorize-wg", headers=h)
+    assert resp.status_code == 409, resp.text
+    assert "wg_endpoint" in resp.json()["detail"]
+
+    # Unset path is fine: the gateway is behind NAT so a relay pair is allocated.
+    # A separate owner avoids the per-user active-session cap.
+    h2, gid2 = make_online_gateway("behind-nat-2@example.com")
+    s2 = new_session(h2, gid2)
+    ok = c.post(f"/api/v1/sessions/{s2}/authorize-wg", headers=h2)
+    assert ok.status_code == 200, ok.text
+    assert ok.json()["connection_path"] == "relay"

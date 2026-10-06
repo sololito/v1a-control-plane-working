@@ -155,7 +155,10 @@ def heartbeat(body: schemas.HeartbeatRequest, request: Request,
         if stale:
             _audit(db, "gateway", str(gw.id), "gateway.replay_rejected", str(gw.id))
             db.commit()
-            raise HTTPException(status_code=409, detail="stale nonce (replay?)")
+            # Hand the current counter back so a rebooted agent can resume
+            # from it instead of retrying the same rejected nonce forever.
+            raise HTTPException(status_code=409, detail={
+                "error": "stale nonce (replay?)", "last_nonce": gw.last_nonce})
         gw.last_nonce = body.nonce
     gw.last_seen = datetime.utcnow()
     gw.status = "online"
@@ -168,6 +171,32 @@ def heartbeat(body: schemas.HeartbeatRequest, request: Request,
     if body.ip_hint:
         gw.ip_metadata = json.dumps({"ip_hint": body.ip_hint.strip()[:64],
                                      "seen": str(datetime.utcnow())})
+    if body.wg_endpoint is not None:
+        # Merge so declaring an endpoint doesn't wipe the ip_hint.
+        try:
+            meta = json.loads(gw.ip_metadata or "{}")
+        except Exception:
+            meta = {}
+        ep = body.wg_endpoint.strip()
+        if ep:
+            host, _, port = ep.rpartition(":")
+            if not host or not port.isdigit() or not (1 <= int(port) <= 65535):
+                raise HTTPException(status_code=422,
+                                    detail="wg_endpoint must be host:port")
+            meta["wg_endpoint"] = ep[:128]
+        else:
+            meta.pop("wg_endpoint", None)
+        meta["seen"] = str(datetime.utcnow())
+        gw.ip_metadata = json.dumps(meta)
+    # Audit trail: the address this gateway connected FROM is server-observed and
+    # kept separately from ip_hint, which the gateway merely claims about itself.
+    try:
+        meta = json.loads(gw.ip_metadata or "{}")
+    except Exception:
+        meta = {}
+    meta["remote_ip"] = client_ip(request)
+    meta["seen"] = str(datetime.utcnow())
+    gw.ip_metadata = json.dumps(meta)
     db.commit()
     return {"ok": True, "status": gw.status, "server_time": datetime.utcnow()}
 

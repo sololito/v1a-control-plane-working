@@ -9,9 +9,13 @@ API endpoints:
 - GET /api/v1/gateways/{gateway_id}/configuration
   Returns gateway's WireGuard public key and tunnel info
   (private key NEVER included)
+- POST /api/v1/gateways/{gateway_id}/wg-public-key
+  Device registers its OWN WireGuard public key (private key never leaves it)
 """
 
+import base64
 import json
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -19,9 +23,15 @@ from app import models, schemas
 from app.config import get_settings
 from app.db import get_db
 from app.deps import get_current_gateway, get_current_user_device
+from app.ratelimit import check_rate, client_ip
 from app.gateway.keypair import generate_wg_keypair, read_wg_private_key_from_local_storage, is_wg_keypair_generated
 
 router = APIRouter(tags=["gateway-wg"])
+
+
+def _audit(db, actor_type, actor_id, action, rid=None, ip=None):
+    db.add(models.AuditLog(actor_type=actor_type, actor_id=actor_id, action=action,
+                           resource_type="gateway", resource_id=rid, ip=ip))
 
 _ACTIVE = ("requested", "authorized", "connecting", "connected")
 
@@ -145,6 +155,86 @@ def gateway_configuration(
     return config
 
 
+WG_KEY_RE = re.compile(r"^[A-Za-z0-9+/]{43}=$")
+
+
+def _validate_wg_public_key(value: str) -> str:
+    """WireGuard keys are 32 bytes, base64 -> exactly 44 chars ending in '='."""
+    key = (value or "").strip()
+    if len(key) != 44 or not WG_KEY_RE.match(key):
+        raise HTTPException(
+            status_code=422,
+            detail="wg_public_key must be a 44-char base64 WireGuard key ending in '='",
+        )
+    try:
+        if len(base64.b64decode(key, validate=True)) != 32:
+            raise ValueError("not 32 bytes")
+    except Exception:
+        raise HTTPException(status_code=422, detail="wg_public_key is not valid base64")
+    return key
+
+
+@router.post("/gateways/{gateway_id}/wg-public-key")
+def register_wg_public_key(
+    gateway_id: str,
+    body: dict,
+    request: Request,
+    gw: models.Gateway = Depends(get_current_gateway),
+    db: Session = Depends(get_db),
+):
+    """Register the gateway's WireGuard PUBLIC key. Called by the device itself.
+
+    The gateway generates its X25519 keypair locally, keeps the private half in
+    local storage, and uploads only the public half here. The cloud therefore
+    never holds — or can ever leak — a gateway private key.
+
+    Authentication uses the gateway's own bearer token, so the device that
+    owns the private key is the device registering the public key.
+
+    Re-registering is allowed only when the gateway currently has no working
+    peer sessions, so a stolen owner token cannot silently repoint an active
+    tunnel (which would be a denial of service at best).
+    """
+    check_rate(f"gw_wgkey:{gateway_id}", client_ip(request), 10)
+    if str(gw.id) != str(gateway_id):
+        raise HTTPException(status_code=403, detail="token does not match gateway")
+    pub = _validate_wg_public_key(body.get("wg_public_key"))
+
+    previous = gw.wg_public_key
+    if previous and previous != pub:
+        active = (db.query(models.ConnectionSession)
+                  .filter(models.ConnectionSession.gateway_id == gw.id,
+                          models.ConnectionSession.status.in_(("requested", "authorized",
+                                                              "connecting", "connected")))
+                  .count())
+        if active:
+            raise HTTPException(
+                status_code=409,
+                detail=f"gateway already has {active} active session(s); "
+                       "revoke them before re-keying",
+            )
+    if previous == pub:
+        return {"status": "unchanged", "wg_public_key": pub}
+
+    gw.wg_public_key = pub
+    db.add(gw)
+    db.add(models.GatewayEvent(
+        gateway_id=gw.id,
+        event_type="wg_public_key_registered",
+        payload=json.dumps({"rotated": bool(previous)}),
+    ))
+    _audit(db, "gateway", str(gw.id), "gateway.wg_public_key_registered",
+           str(gw.id), ip=client_ip(request))
+    db.commit()
+    db.refresh(gw)
+    return {
+        "status": "registered" if not previous else "rotated",
+        "wg_public_key": gw.wg_public_key,
+        "message": ("Only the public key is stored on the server. "
+                    "The private key never leaves the gateway."),
+    }
+
+
 @router.post("/gateways/{gateway_id}/generate-keys")
 def generate_gateway_keys(
     gateway_id: str,
@@ -152,84 +242,19 @@ def generate_gateway_keys(
     user_dev=Depends(get_current_user_device),
     db: Session = Depends(get_db),
 ):
-    """Generate WireGuard keypair on the gateway device.
+    """REMOVED — server-side WireGuard key generation is no longer supported.
 
-    CRITICAL: This should be called once during gateway initial registration.
-    The private key is generated on the gateway and MUST NEVER be transmitted
-    off the device. Only the public key is returned for backend coordination.
+    Generating keys here meant the private key had to travel back to the
+    gateway over the network and was persisted in the database. Both are
+    unacceptable: a database read, backup, or SQL injection becomes a full
+    tunnel compromise.
 
-    Flow:
-    1. Call this endpoint (or run on gateway CLI)
-    2. Keypair is generated: private_key stays on gateway, public_key stored in DB
-    3. Public key can now be used for tunnel setup
-    4. Subsequent calls may re-key (security event) if needed
-
-    Authentication: Gateway owner or admin only.
-
-    Returns:
-        - private_key: b64-encoded private key (gateway stores this locally!)
-          - ⚠️ WARNING: This is returned for completeness but MUST be stored
-            locally on the gateway device only. Never transmit or store in API logs.
-        - public_key: b64-encoded public key (can be stored in backend/DB)
-        - status: "generated" if successful
-
-    Raises:
-        403: User not authorized
-        409: Keypair already generated (use re-key flow instead)
+    Use POST /api/v1/gateways/{gateway_id}/wg-public-key instead: the gateway
+    generates its own keypair locally and uploads only the public key.
     """
-    gw = db.query(models.Gateway).filter(models.Gateway.id == gateway_id).first()
-    if not gw:
-        raise HTTPException(status_code=404, detail="Gateway not found")
-
-    # Check authorization
-    user, _ = user_dev
-    if str(gw.owner_user_id) != str(user.id) and not user.is_admin:
-        raise HTTPException(status_code=403, detail="Not authorized for this gateway")
-
-    # Check if keys already generated
-    if gw.wg_private_key and gw.wg_public_key:
-        raise HTTPException(
-            status_code=409,
-            detail="WireGuard keypair already generated. "
-                   "Use re-key procedure if rotation is needed.",
-        )
-
-    # Generate keypair using gateway function
-    keys = generate_wg_keypair()
-
-    # Store public key in database (this is safe - it's the public part)
-    gw.wg_public_key = keys["public_key"]
-
-    # Store private key on gateway device ONLY (NOT in database API!)
-    # In prototype, we document this; in production, write to gateway secure storage
-    # gw.wg_private_key = keys["private_key"]  # DO NOT store in DB API!
-    # Instead, remind developer to store locally on gateway:
-    #
-    # Example for Linux gateway:
-    #   echo "$KEY" > /etc/wireguard/private_key
-    #   chmod 600 /etc/wireguard/private_key
-    #
-    # Example for OpenWrt:
-    #   uci set wireless.@wireguard[0].private_key='$KEY'
-    #   uci commit wireless
-    #
-    # For now, set a flag and remind
-    gw.wg_private_key = keys["private_key"]  # Prototype: store for demo (INSECURE for prod)
-
-    # TODO: Also call store_wg_private_key_locally(keys["private_key"])
-    #       and read_wg_private_key_from_local_storage() in production
-
-    db.add(gw)
-    db.commit()
-    db.refresh(gw)
-
-    return {
-        "status": "generated",
-        "private_key": keys["private_key"],  # ⚠�️ WARNING included in response
-        "public_key": keys["public_key"],
-        "message": (
-            "PRIVATE KEY MUST BE STORED ON GATEWAY DEVICE ONLY. "
-            "See endpoint docs for secure storage instructions. "
-            "Never store in API logs or transmit off-gateway."
-        ),
-    }
+    raise HTTPException(
+        status_code=410,
+        detail="generate-keys is removed: the cloud no longer generates or stores "
+               "WireGuard private keys. Generate the keypair on the device and "
+               "POST the public key to /api/v1/gateways/{id}/wg-public-key.",
+    )
