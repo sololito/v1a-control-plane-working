@@ -18,11 +18,13 @@ held below the Cloud's offline threshold — see app/gateway/backoff.py.
 """
 import argparse
 import json
+import os
 import time
 import urllib.request
 
 from app.gateway.backoff import Backoff, describe
 from app.gateway.dataplane import PeerSpec, get_dataplane
+from app.gateway.events import EventSpool
 
 # Re-verifying ip_forward and the NAT rules costs several subprocesses per
 # check and both are idempotent, so pace them independently of peer sync.
@@ -46,22 +48,51 @@ def fetch_desired_peers(api_base: str, gateway_id: str, token: str,
 
 
 def sync_once(api_base: str, gateway_id: str, token: str, dataplane,
-              check_forwarding: bool = True) -> dict:
+              check_forwarding: bool = True, events=None) -> dict:
     """Reconcile local peers with the Cloud's desired state.
 
     `check_forwarding` re-verifies ip_forward/NAT; both are idempotent, so
     callers on a hot loop can skip the subprocesses and re-check occasionally.
+
+    `events` is an optional EventSpool-like sink (`emit(type, payload)`). When
+    the caller passes one, reconciliation leaves evidence in the local spool —
+    peers changed, the interface is down, forwarding is broken — so a Cloud
+    outage cannot erase what the gateway saw. See GATEWAY_EVENT_CACHE.md.
     """
     desired = fetch_desired_peers(api_base, gateway_id, token)
     if check_forwarding:
         errors = list(dataplane.ensure_forwarding() or [])
         errors += list(dataplane.ensure_nat() or [])
+        if errors and events is not None:
+            events.emit("forwarding_error", {"errors": [str(e)[:300] for e in errors[:5]]})
     else:
         errors = []
     result = dataplane.sync_peers(desired)
     result.setdefault("errors", [])
     result["errors"] = list(result["errors"]) + errors
+    if events is not None:
+        emit_sync_events(events, dataplane, result)
     return result
+
+
+def emit_sync_events(events, dataplane, result: dict) -> None:
+    """Turn one reconcile result into spooled events.
+
+    Evidence, not logging: these rows are what the audit report shows when an
+    administrator asks what happened on a tunnel while the Cloud was down.
+    """
+    for pub in result.get("added", [])[:20]:
+        events.emit("peer_added", {"peer_public_key": pub})
+    for pub in result.get("removed", [])[:20]:
+        events.emit("peer_removed", {"peer_public_key": pub})
+    errs = result.get("errors") or []
+    if errs:
+        events.emit("sync_error", {"error": str(errs[0])[:300], "count": len(errs)})
+    try:
+        if not dataplane.interface_up():
+            events.emit("wg_iface_down", {"iface": getattr(dataplane, "interface", "wg0")})
+    except Exception:
+        pass  # evidence only; never fail the reconcile
 
 
 def main():  # pragma: no cover - operational entrypoint
@@ -79,6 +110,10 @@ def main():  # pragma: no cover - operational entrypoint
     dp = get_dataplane(args.kind)
     backoff = Backoff(base=args.interval, cap=args.max_backoff)
     last_nat_check = 0.0
+    # Opt-in only: this entrypoint is the dev/test loop, while the shipping
+    # agent (firmware/linux_gateway/gateway_agent.py) owns the spool in
+    # production. Nothing is queued unless the operator names a path.
+    spool = EventSpool(os.environ["EVENT_SPOOL"]) if os.environ.get("EVENT_SPOOL") else None
     print(f"[sync] base={args.interval:g}s cap={args.max_backoff:g}s", flush=True)
     while True:
         ok = False
@@ -86,7 +121,7 @@ def main():  # pragma: no cover - operational entrypoint
             now = time.monotonic()
             due_nat = (now - last_nat_check) >= args.nat_reverify
             result = sync_once(args.api_base, args.gateway_id, args.token, dp,
-                               check_forwarding=due_nat)
+                               check_forwarding=due_nat, events=spool)
             if due_nat:
                 last_nat_check = now
             ok = not result.get("errors")

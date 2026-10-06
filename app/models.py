@@ -130,7 +130,27 @@ class GatewayEvent(Base):
     gateway_id = Column(GUID(), ForeignKey("gateways.id", ondelete="CASCADE"), nullable=False)
     event_type = Column(String(60), nullable=False)
     payload = Column(Text, nullable=True)  # JSON string
+    # Store-and-forward backfill: rows that arrived in a batch carry the uuid
+    # the gateway minted at record time, so a resent batch after a lost
+    # response is counted as a duplicate instead of a second copy. Server
+    # generated rows (heartbeat, nonce_resync, ...) keep NULL and are exempt
+    # from the unique index by its partial WHERE clause.
+    event_id = Column(String(36), nullable=True)
+    # created_at is when the event happened — for batched rows that is the
+    # *gateway's* clock. received_at/remote_ip are what the Cloud observed, and
+    # they double as the provenance flag: non-NULL means the gateway sent the
+    # row (a claim, shown as unverified), NULL means the Cloud wrote it itself
+    # (heartbeat, registered, ...) and no sensor is speaking. A large gap
+    # between the two clocks means the sensor has no NTP yet.
+    received_at = Column(DateTime, nullable=True)
+    remote_ip = Column(String(64), nullable=True)
     created_at = Column(DateTime, default=utcnow, nullable=False)
+    __table_args__ = (
+        Index("uq_gw_event_id", "gateway_id", "event_id", unique=True,
+              sqlite_where=sa.text("event_id IS NOT NULL"),
+              postgresql_where=sa.text("event_id IS NOT NULL")),
+        Index("ix_gw_event_gateway_time", "gateway_id", "created_at"),
+    )
 
 
 class GatewayNonce(Base):

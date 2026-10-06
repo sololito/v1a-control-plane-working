@@ -401,6 +401,8 @@ def test_maintenance_gives_every_job_its_own_session_and_closes_it(maintenance,
     monkeypatch.setattr(maintenance, "_mark_offline_gateways",
                         lambda db: {"offline": 0})
     monkeypatch.setattr(maintenance, "_reconcile_relay", lambda db: {"ok": True})
+    monkeypatch.setattr(maintenance, "_prune_gateway_events",
+                        lambda db: {"pruned": 0})
 
     def factory():
         db = FakeDB()
@@ -408,8 +410,8 @@ def test_maintenance_gives_every_job_its_own_session_and_closes_it(maintenance,
         return db
 
     maintenance.run_once(factory)
-    # Three jobs, three distinct sessions, all closed.
-    assert len(made) == 3 and len({id(d) for d in made}) == 3
+    # Four jobs, four distinct sessions, all closed.
+    assert len(made) == 4 and len({id(d) for d in made}) == 4
     assert all(d.closed for d in made)
 
 
@@ -424,6 +426,8 @@ def test_maintenance_closes_the_session_of_a_job_that_raises(maintenance,
     monkeypatch.setattr(maintenance, "_expire_sessions", boom)
     monkeypatch.setattr(maintenance, "_mark_offline_gateways", lambda db: {"offline": 0})
     monkeypatch.setattr(maintenance, "_reconcile_relay", lambda db: {"ok": True})
+    monkeypatch.setattr(maintenance, "_prune_gateway_events",
+                        lambda db: {"pruned": 0})
 
     def factory():
         db = FakeDB()
@@ -435,6 +439,7 @@ def test_maintenance_closes_the_session_of_a_job_that_raises(maintenance,
     # A failing job must not stop the others.
     assert results["mark_offline_gateways"] == {"offline": 0}
     assert results["reconcile_relay"] == {"ok": True}
+    assert results["prune_gateway_events"] == {"pruned": 0}
     assert all(d.closed for d in made)
 
 

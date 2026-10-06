@@ -1,4 +1,8 @@
-"""Alembic env: autogenerate from app.models. Baseline SQL in migrations/001..004."""
+"""Alembic env: autogenerate from app.models.
+
+Baseline SQL lives in `migrations/00*.sql` (001..008, applied by
+`deploy/install_server.sh` line by line; alembic is for what comes after).
+"""
 from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 from alembic import context

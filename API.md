@@ -20,7 +20,8 @@
 - POST /gateways/{id}/auth/verify {nonce,signature} -> {gateway_token} (single-use nonce)
 - GET /gateways/{id}/configuration (gateway auth) -> {tunnel:{provider:null|wireguard}}
 - GET /gateways/{id}/sessions (gateway auth) -> device inbox: non-terminal sessions for this gateway (no token material)
-- POST /gateways/{id}/events (gateway auth)
+- POST /gateways/{id}/events (gateway auth) — single event; stores `received_at`/`remote_ip`, which is what marks a row as gateway-reported
+- POST /gateways/{id}/events/batch (gateway auth) {events:[{event_id,recorded_at,type,payload?}]} -> {ok,stored,duplicates} — store-and-forward backfill of the gateway's local queue (`GATEWAY_EVENT_CACHE.md`). ≤200 events / ≤256 KiB / payload ≤8 KiB, `event_id` is a gateway-minted uuid so a resend is counted as a duplicate; own rate-limit bucket `gw_events:{id}`
 - POST /me/gateways/{id}/revoke (auth) | POST /me/gateways/{id}/reactivate (auth)
 - POST /me/gateways/{id}/grants {email,access_type} (owner) — PARTNER/BUSINESS share
 
@@ -41,8 +42,9 @@
 - GET /admin/audit?action=auth.*&actor=&resource_type=&resource_id=&ip=&since=&until=&limit=&offset= -> {total,items[{at,action,actor_type,actor,resource_type,resource,ip,detail}]}
 - GET /admin/devices?user_id=&status=&q= -> {total,items[{id,email,device_name,ip_address,imei,mac_address,user_agent,last_seen,...}]} (`q` matches IP/IMEI/MAC/name)
 - GET /admin/tunnels?status= -> [{gateway_id,owner_email,sessions_total,sessions_active,devices_total,sites_recorded,...}] — one row per tunnel
-- GET /admin/tunnels/{gateway_id}/audit?session_id=&limit= -> full report for one tunnel (owner, sessions, device IP/IMEI/MAC, first ten sites per session, audit rows)
+- GET /admin/tunnels/{gateway_id}/audit?session_id=&limit= -> full report for one tunnel (owner, sessions, device IP/IMEI/MAC, first ten sites per session, audit rows, and a *gateway-reported* events section labelled unverified)
 - GET /admin/tunnels/{gateway_id}/audit/print -> **printable HTML** report for that tunnel
+- GET /admin/gateways/{gateway_id}/events?since=&until=&type=&limit= -> {total,gateway_id,note:"gateway-reported (unverified)",items[{at,received_at,shown_at,type,payload,remote_ip,event_id,clock_suspect,unverified}]} — raw sensor claims, including anything it queued during an outage
 - GET /admin/sessions/{session_id}/audit/print -> printable HTML report for one tunnel session
 - UI: GET /admin (login + active users / stats+alerts / gateways / tunnels / devices / sessions / audit / ops) — Tunnels tab prints the per-tunnel audit report
 - GET /health /ready /metrics (JSON) /metrics/prometheus (Prometheus text), GET /

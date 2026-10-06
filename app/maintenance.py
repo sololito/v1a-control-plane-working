@@ -47,6 +47,13 @@ def _reconcile_relay(db):
     return result
 
 
+def _prune_gateway_events(db):
+    from app.config import get_settings
+    from app.jobs import prune_gateway_events
+    s = get_settings()
+    return {"pruned": prune_gateway_events(db, s.gateway_event_retention_days)}
+
+
 def run_once(session_factory) -> dict:
     """Run every maintenance job once. Returns per-job results or error text.
 
@@ -58,6 +65,7 @@ def run_once(session_factory) -> dict:
         ("expire_sessions", _expire_sessions),
         ("mark_offline_gateways", _mark_offline_gateways),
         ("reconcile_relay", _reconcile_relay),
+        ("prune_gateway_events", _prune_gateway_events),
     )
     for name, fn in jobs:
         db = session_factory()

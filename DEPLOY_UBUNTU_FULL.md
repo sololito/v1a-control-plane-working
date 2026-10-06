@@ -54,7 +54,7 @@ RELAY_PORT_END=20999
 CORS_ORIGINS=*
 ```
 
-Apply the DB schema (including 006, which purges stored WireGuard private keys, and 007, the device forensics + visited-site audit tables):
+Apply the DB schema (including 006, which purges stored WireGuard private keys, 007, the device forensics + visited-site audit tables, and 008, the gateway event batch columns):
 
 ```bash
 ./venv/bin/python - <<'PY'
@@ -63,7 +63,7 @@ c = sqlite3.connect("odivora_home.db")
 for f in ["migrations/001_init.sql","migrations/002_billing.sql",
           "migrations/003_production.sql","migrations/004_crypto_signalling.sql",
           "migrations/005_v1b_wireguard.sql","migrations/006_no_wg_private_key.sql",
-          "migrations/007_device_audit.sql"]:
+          "migrations/007_device_audit.sql","migrations/008_gateway_event_batch.sql"]:
     for line in open(f):
         s = line.strip()
         if s.startswith(("ALTER","CREATE")):

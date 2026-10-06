@@ -30,6 +30,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 from app.gateway.backoff import Backoff, describe  # noqa: E402
 from app.gateway.dataplane import PeerSpec, get_dataplane  # noqa: E402
+from app.gateway.events import DEFAULT_PATH as EVENT_SPOOL_DEFAULT  # noqa: E402
+from app.gateway.events import spool_from_env  # noqa: E402
 
 STATE_FILE = "/etc/odivora/state.json"
 ENV_FILE = "/etc/odivora/gateway.env"
@@ -80,6 +82,11 @@ def _env():
     # Optional public endpoint (host:port) for direct connections, e.g. when
     # UDP 51820 is port-forwarded from the home router. Unset => relay path.
     cfg.setdefault("WG_ENDPOINT", os.environ.get("WG_ENDPOINT", ""))
+    # Local store-and-forward queue for gateway-observed events (the sensor's
+    # memory while the Cloud is unreachable). See GATEWAY_EVENT_CACHE.md.
+    cfg.setdefault("EVENT_SPOOL", os.environ.get("EVENT_SPOOL", EVENT_SPOOL_DEFAULT))
+    cfg.setdefault("EVENT_SHIP_MIN_EVENTS", os.environ.get("EVENT_SHIP_MIN_EVENTS", "20"))
+    cfg.setdefault("EVENT_SHIP_MIN_AGE", os.environ.get("EVENT_SHIP_MIN_AGE", "30"))
     return cfg
 
 
@@ -136,13 +143,13 @@ def _save_state(state):
         raise
 
 
-def _post(url, payload, token=None):
+def _post(url, payload, token=None, timeout=20):
     req = urllib.request.Request(url, data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"})
     if token:
         req.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, json.loads(r.read().decode() or "{}")
     except urllib.error.HTTPError as e:
         try:
@@ -155,7 +162,7 @@ def _post(url, payload, token=None):
         return 0, {"error": str(e)}
 
 
-def refresh_token(cfg, state, attempts=2):
+def refresh_token(cfg, state, attempts=2, events=None):
     """Re-mint the gateway bearer token via the Ed25519 challenge/verify flow.
 
     Gateway tokens expire (GATEWAY_TOKEN_EXPIRE_MINUTES). Without this the
@@ -203,6 +210,10 @@ def refresh_token(cfg, state, attempts=2):
                 _save_state(state)
                 cfg["GATEWAY_TOKEN"] = res["gateway_token"]
                 print("[auth] token refreshed")
+                if events is not None:
+                    # Worth a row: a token that silently expired is the first
+                    # thing asked about when a gateway "mysteriously" vanished.
+                    events.emit("token_refreshed", {"gateway_id": str(gid)})
                 return True
             if code != 0:
                 print(f"[auth] verify failed HTTP {code}: {res}")
@@ -216,7 +227,7 @@ def refresh_token(cfg, state, attempts=2):
     return False
 
 
-def heartbeat(cfg, state, max_refresh=1):
+def heartbeat(cfg, state, max_refresh=1, events=None):
     """Prove liveness to the Cloud and prove our token is still valid.
 
     Returns True when the gateway is confirmed healthy, False when the caller
@@ -251,7 +262,7 @@ def heartbeat(cfg, state, max_refresh=1):
             return False
         if code in (401, 403):
             print(f"[auth] token rejected ({code}) — refreshing via Ed25519 challenge")
-            if not refresh_token(cfg, state):
+            if not refresh_token(cfg, state, events=events):
                 print("[auth] token refresh failed; backing off")
                 return False
             cfg["GATEWAY_TOKEN"] = state.get("gateway_token", cfg["GATEWAY_TOKEN"])
@@ -260,10 +271,6 @@ def heartbeat(cfg, state, max_refresh=1):
             continue
         print(f"[hb] HTTP {code}: {res}")
         return False
-    return False
-        print("[auth] token refresh failed; retrying next poll")
-        return False
-    print(f"[hb] HTTP {code}: {res}")
     return False
 
 
@@ -322,6 +329,58 @@ def _write_wg_conf(cfg, gateway_id):
         print(f"[wg] conf write failed: {exc}")
 
 
+# Server-side caps (settings event_batch_max_events / event_batch_max_bytes);
+# matching them here is what makes a drain one round trip instead of many.
+SHIP_BATCH_EVENTS = 200
+SHIP_BATCH_BYTES = 262144
+
+
+def ship_events(cfg, spool, tracker, min_events=20, min_age=30.0, timeout=5.0):
+    """Drain the local queue into the Cloud. Returns the server's reply, or None.
+
+    Only called after a healthy heartbeat, so "the Cloud is up" is already
+    proven. `tracker` remembers the last attempt so a quiet gateway does not
+    spend a round trip on a nearly empty queue, and a gateway coming back from
+    an outage drains in consecutive loops instead of one batch per interval.
+    No attempt yet is infinitely long ago: the first ship after a restart goes
+    out immediately, which is exactly when a backlog from the last run matters.
+
+    Nothing here raises: a failed ship is just a queue that stays full.
+    """
+    try:
+        events = spool.pending()
+    except OSError:
+        return None
+    if not events:
+        return None
+    now = time.monotonic()
+    last = tracker.get("last_attempt")
+    if last is not None and len(events) < min_events and (now - last) < min_age:
+        return None  # not worth a round trip yet
+    tracker["last_attempt"] = now
+    batch = spool.batch(SHIP_BATCH_EVENTS, SHIP_BATCH_BYTES)
+    if not batch:
+        return None
+    code, res = _post(
+        f"{cfg['ODIVORA_API_BASE']}/api/v1/gateways/{cfg['GATEWAY_ID']}/events/batch",
+        {"events": batch}, token=cfg["GATEWAY_TOKEN"], timeout=timeout)
+    if code == 200:
+        spool.ack(batch)
+        print(f"[events] shipped {res.get('stored', len(batch))} "
+              f"({res.get('duplicates', 0)} duplicates, {spool.depth()} left)", flush=True)
+        return res
+    if code == 422:
+        # Our own rows violate the contract. Dropping the batch keeps the
+        # queue from wedging forever; the marker records what was lost.
+        detail = res.get("detail") if isinstance(res, dict) else res
+        print(f"[events] Cloud rejected the batch ({detail}) — dropping it", flush=True)
+        spool.emit("event_batch_rejected", {"detail": str(detail)[:300]})
+        spool.ack(batch)
+        return {"error": str(detail)}
+    print(f"[events] ship failed HTTP {code}; {len(batch)} events stay queued", flush=True)
+    return None
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--interval", type=float, default=None)
@@ -369,6 +428,16 @@ def main():
     print(f"[net] wg={dp.interface} wan={dp.wan_interface} tunnel={dp.tunnel_subnet}")
     print(f"[loop] heartbeat {interval}s, backoff cap {max_backoff}s")
 
+    # The sensor's memory: everything the Cloud would otherwise never learn
+    # because it was unreachable. See GATEWAY_EVENT_CACHE.md.
+    spool = spool_from_env(cfg, fallback_dir=os.path.dirname(STATE_FILE))
+    ship_tracker: dict = {}
+    last_handshake: dict[str, float] = {}
+    last_wan = None
+    wg_down_reported = False
+    nat_healthy = False
+    spool.emit("agent_started", {"kind": cfg["DEVICE_KIND"], "pid": os.getpid()})
+
     # Liveness and peer reconciliation have different urgency. The heartbeat is
     # cheap and must keep flowing; the sync shells out to wg/iptables several
     # times, so it runs on its own cadence instead of once per heartbeat. The
@@ -381,37 +450,76 @@ def main():
     while True:
         ok = False
         try:
-            if heartbeat(cfg, state):
+            if heartbeat(cfg, state, events=spool):
                 ok = True
                 ensure_wg_conf(cfg, cfg["GATEWAY_ID"], dp)
                 now = time.monotonic()
+                due_nat = (now - last_nat_check) >= NAT_REVERIFY_SECONDS
                 if not dp.interface_up():
+                    if not wg_down_reported:
+                        spool.emit("wg_iface_down", {"iface": dp.interface})
+                        wg_down_reported = True
                     print("[sync] wg interface still down; skipping peer sync")
-                elif last_sync is None or (now - last_sync) >= peer_sync_interval:
-                    last_sync = now
-                    try:
-                        from app.gateway.daemon import sync_once
-                        res = sync_once(cfg["ODIVORA_API_BASE"], cfg["GATEWAY_ID"],
-                                        cfg["GATEWAY_TOKEN"], dp,
-                                        check_forwarding=(now - last_nat_check) >= NAT_REVERIFY_SECONDS)
-                        last_nat_check = now
-                        if res["added"] or res["removed"]:
-                            print(f"[sync] +{len(res['added'])} -{len(res['removed'])} ={len(res['kept'])}")
-                        for err in res.get("errors", []):
-                            print(f"[sync] ERROR {err}")
-                    except Exception as exc:
-                        print(f"[sync] error: {exc}")
-                        ok = False
+                else:
+                    wg_down_reported = False
+                    if last_sync is None or (now - last_sync) >= peer_sync_interval:
+                        last_sync = now
+                        try:
+                            from app.gateway.daemon import sync_once
+                            res = sync_once(cfg["ODIVORA_API_BASE"], cfg["GATEWAY_ID"],
+                                            cfg["GATEWAY_TOKEN"], dp,
+                                            check_forwarding=due_nat, events=spool)
+                            if due_nat:
+                                last_nat_check = now
+                                # sync_once already reported failures as
+                                # forwarding_error; this records the (re)working
+                                # state so the report can show the gap closing.
+                                if res.get("errors"):
+                                    nat_healthy = False
+                                elif not nat_healthy:
+                                    spool.emit("nat_applied", {"iface": dp.wan_interface})
+                                    nat_healthy = True
+                            if res["added"] or res["removed"]:
+                                print(f"[sync] +{len(res['added'])} -{len(res['removed'])} ={len(res['kept'])}")
+                            for err in res.get("errors", []):
+                                print(f"[sync] ERROR {err}")
+                        except Exception as exc:
+                            print(f"[sync] error: {exc}")
+                            spool.emit("sync_error", {"error": str(exc)[:300]})
+                            ok = False
+                # Observations the Cloud cannot make for itself while the
+                # tunnel is up but the API is unreachable.
+                try:
+                    for pub, ts in dp.handshakes().items():
+                        ts = float(ts or 0)
+                        if ts and ts > last_handshake.get(pub, 0.0):
+                            last_handshake[pub] = ts
+                            spool.emit("handshake_seen",
+                                       {"peer_public_key": pub, "at": int(ts)})
+                    wan = dp.wan_ip()
+                    if wan and wan != last_wan:
+                        if last_wan is not None:
+                            spool.emit("wan_ip_changed", {"old": last_wan, "new": wan})
+                        last_wan = wan
+                except Exception as exc:
+                    print(f"[events] observation failed: {exc}")
+                ship_events(cfg, spool, ship_tracker,
+                            min_events=int(cfg["EVENT_SHIP_MIN_EVENTS"]),
+                            min_age=float(cfg["EVENT_SHIP_MIN_AGE"]))
         except Exception as exc:
             print(f"[agent] error: {exc}")
             ok = False
         if args.once:
+            spool.emit("agent_stopped", {"reason": "once"})
             break
         delay = backoff.delay(ok)
         if not ok:
             print(f"[loop] unhealthy, retrying in {delay:.1f}s ({describe(backoff)})")
         # Wait, but wake early if the process is asked to stop.
         stop_wait(delay)
+        if _STOPPING:
+            spool.emit("agent_stopped", {"reason": "stop"})
+            break
 
 
 if __name__ == "__main__":

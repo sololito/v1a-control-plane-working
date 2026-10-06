@@ -39,6 +39,14 @@ class Settings(BaseSettings):
     # How many visited sites are retained per device+tunnel-session ("first ten").
     visit_site_limit: int = 10
     audit_page_max: int = 500
+    # --- Gateway event cache (store-and-forward backfill) ---
+    # Raw gateway-reported events are evidence, not the permanent record (that
+    # is AuditLog/DeviceVisit), so they are pruned after this long. 0 disables.
+    gateway_event_retention_days: int = 90
+    # Caps a misbehaving agent cannot exceed: the endpoint rejects anything
+    # larger rather than letting one client grow the table without bound.
+    event_batch_max_events: int = 200
+    event_batch_max_bytes: int = 262144  # 256 KiB per batch
     # --- V1B relay / NAT traversal ---
     relay_control_url: str = ""  # e.g. http://relay.internal:9090; empty = dev/local allocation
     relay_public_host: str = ""  # public host:port advertised to phone/gateway

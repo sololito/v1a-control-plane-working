@@ -10,7 +10,7 @@ administrator can print one report per tunnel straight from the browser.
 """
 import html
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from app.config import get_settings
 
@@ -38,11 +38,33 @@ def _audit_rows(db, ids: set, actors: set, limit: int):
              "resource_id": r.resource_id, "ip": r.ip, "detail": r.detail} for r in rows]
 
 
+def gateway_event_row(r) -> dict:
+    """One gateway-reported event, marked as a sensor claim.
+
+    `at` is the gateway's clock; `received_at` is the Cloud's. When they
+    disagree by more than a day the sensor clearly has no (or a wrong) NTP, so
+    `shown_at` — what a reader should actually trust — flips to the Cloud's
+    time. `unverified` is False only for rows the Cloud wrote itself, which
+    never reach this section. See GATEWAY_EVENT_CACHE.md §5.
+    """
+    suspect = bool(r.received_at and r.created_at and
+                   abs((r.created_at - r.received_at).total_seconds()) > 86400)
+    try:
+        payload = json.loads(r.payload) if r.payload else {}
+    except ValueError:
+        payload = {"raw": r.payload}
+    return {"at": _iso(r.created_at), "received_at": _iso(r.received_at),
+            "shown_at": _iso(r.received_at if suspect else r.created_at),
+            "type": r.event_type, "payload": payload, "remote_ip": r.remote_ip,
+            "event_id": r.event_id, "clock_suspect": suspect,
+            "unverified": r.received_at is not None}
+
+
 def build_tunnel_report(db, gateway, session=None, audit_limit: int | None = None) -> dict:
     """Assemble the audit report for one gateway (tunnel), optionally narrowed
     to a single peer session."""
-    from app.models import (ConnectionSession, DeviceVisit, SessionEvent,
-                            User, UserDevice)
+    from app.models import (ConnectionSession, DeviceVisit, GatewayEvent,
+                            SessionEvent, User, UserDevice)
     s = get_settings()
     audit_limit = audit_limit or s.audit_page_max
 
@@ -80,6 +102,23 @@ def build_tunnel_report(db, gateway, session=None, audit_limit: int | None = Non
         {str(d.id) for d in devices} | {str(i) for i in device_ids}
     actor_set = {str(u) for u in user_ids}
     audit = _audit_rows(db, id_set, actor_set, audit_limit)
+
+    # Gateway-reported evidence: what the sensor saw, including anything it
+    # queued while the Cloud was unreachable and shipped later. Rows the Cloud
+    # wrote itself (received_at NULL) are not claims and stay out: section 4
+    # already covers what the server observed. Narrowed to the session window
+    # when the report is for one session, because "what happened on this peer"
+    # is the question that gets asked.
+    gw_q = db.query(GatewayEvent).filter(
+        GatewayEvent.gateway_id == gateway.id,
+        GatewayEvent.received_at.isnot(None))
+    if session is not None and session.requested_at:
+        gw_q = gw_q.filter(GatewayEvent.created_at >= session.requested_at - timedelta(minutes=5))
+        ended = session.ended_at or session.expires_at
+        if ended:
+            gw_q = gw_q.filter(GatewayEvent.created_at <= ended + timedelta(minutes=5))
+    gw_events = [gateway_event_row(r) for r in
+                 gw_q.order_by(GatewayEvent.created_at.desc()).limit(audit_limit).all()]
 
     visits_by_session: dict = {}
     for v in visits:
@@ -135,6 +174,7 @@ def build_tunnel_report(db, gateway, session=None, audit_limit: int | None = Non
             "devices_total": len(devices),
             "sites_recorded": len(visits),
             "audit_events": len(audit),
+            "gateway_events": len(gw_events),
         },
         "devices": [{
             "id": str(d.id), "name": d.device_name, "type": d.device_type,
@@ -147,6 +187,11 @@ def build_tunnel_report(db, gateway, session=None, audit_limit: int | None = Non
         "sessions": sess_out,
         "session_events": [{"at": _iso(e.created_at), "session": str(e.session_id),
                             "event": e.event, "detail": e.detail} for e in events],
+        "gateway_events": gw_events,
+        # Read this before quoting any of the rows above: section 4 is what the
+        # Cloud observed, section 5 is what the sensor claimed.
+        "evidence_note": "gateway_events are gateway-reported (unverified); "
+                         "audit/session rows are server-observed",
         "audit": audit,
     }
 
@@ -194,6 +239,7 @@ def render_report_html(report: dict, *, title: str | None = None,
         ("Devices", summ.get("devices_total")),
         ("Sites recorded", summ.get("sites_recorded")),
         ("Audit events", summ.get("audit_events")),
+        ("Gateway-reported events", summ.get("gateway_events")),
     ])
 
     dev_rows = [[_esc(d["name"]), _esc(d["type"]), _esc(d["status"]), _esc(d["ip"] or "—"),
@@ -236,6 +282,13 @@ def render_report_html(report: dict, *, title: str | None = None,
                    _esc(a.get("ip") or "—"), _esc((a.get("detail") or "")[:120])]
                   for a in report.get("audit", [])]
 
+    gw_rows = [[_esc(g.get("shown_at") or "—"), _esc(g.get("at") or "—"),
+                _esc(g.get("received_at") or "—"), _esc(g.get("type")),
+                _esc(json.dumps(g.get("payload") or {}, default=str)[:160]),
+                _esc(g.get("remote_ip") or "—"),
+                "clock suspect" if g.get("clock_suspect") else ""]
+               for g in report.get("gateway_events", [])]
+
     return f"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <title>{_esc(heading)}</title>
@@ -260,8 +313,15 @@ def render_report_html(report: dict, *, title: str | None = None,
 {_grid(["Device", "Type", "Status", "IP address", "IMEI", "MAC address", "Last seen"], dev_rows)}
 <h2>3. Sessions ({len(report.get('sessions', []))})</h2>
 {sess_html or "<p class='muted'>No sessions.</p>"}
-<h2>4. Audit trail ({len(report.get('audit', []))} events)</h2>
+<h2>4. Audit trail ({len(report.get('audit', []))} events, server-observed)</h2>
 {_grid(["When", "Action", "Actor type", "Actor", "Resource", "Resource id", "IP", "Detail"], audit_rows)}
+<h2>5. Gateway-reported events ({len(report.get('gateway_events', []))}, unverified)</h2>
+{_grid(["Trusted time", "Gateway clock", "Received by cloud", "Event", "Detail", "Source IP", "Clock"], gw_rows)}
+<p class='muted'>Section 5 is what the home gateway claims it observed, including
+anything it queued while ODIVORA was unreachable. It is evidence from a device in
+the user's premises: it cannot be independently verified, so it never substitutes
+for sections 1&ndash;4. Rows flagged &ldquo;clock suspect&rdquo; have a gateway clock more
+than a day away from the server and are shown at the server's time instead.</p>
 <p class="muted">IMEI/MAC values are self-reported by the mobile client and are not
 verified by ODIVORA. IP addresses are observed by the server. Visited sites are
 reported by the client: only the first ten destinations of each session are kept.</p>

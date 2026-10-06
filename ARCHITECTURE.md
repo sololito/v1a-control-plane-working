@@ -24,6 +24,12 @@ Components map 1:1 to Guide §1. Each router+service has clear boundary so it ca
 - Audit trail: `user_devices` keeps server-observed IP + self-reported IMEI/MAC; `device_visits`
   keeps the first ten sites per tunnel session; `app/audit_report.py` renders the per-tunnel
   JSON/printable report (`/admin/tunnels/{id}/audit[/print]`). See MOBILE_APP_FOUNDATION.md.
+- Event cache: the gateway is a sensor, the Cloud is the ledger. The agent appends what it
+  observed to a bounded local JSONL queue (`app/gateway/events.py`) and drains it to
+  `POST /gateways/{id}/events/batch` after a healthy heartbeat; rows keep the gateway's clock
+  plus the Cloud's `received_at`/`remote_ip`, are deduped on the gateway-minted `event_id`,
+  are surfaced in the audit report as *gateway-reported (unverified)*, and are pruned after
+  `GATEWAY_EVENT_RETENTION_DAYS`. See GATEWAY_EVENT_CACHE.md.
 
 ## ER (summary)
 users(1)-*(user_devices, gateways?, connection_sessions, subscriptions); gateways(1)-*(credentials, events); connection_sessions(1)-*(session_events, device_visits); gateways(1)-*(device_visits); audit_logs append-only.

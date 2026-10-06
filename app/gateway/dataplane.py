@@ -176,6 +176,41 @@ class BaseDataPlane:
         rc, _ = self.runner.run(["ip", "link", "show", self.interface])
         return rc == 0
 
+    def handshakes(self) -> dict[str, float]:
+        """Peer public key -> unix time of that peer's last WireGuard handshake.
+
+        Read-only evidence for the event cache. An unreadable interface is
+        reported as "no data" rather than raising: this feeds a log, it does
+        not gate reconciliation.
+        """
+        rc, out = self.runner.run(["wg", "show", self.interface, "latest-handshakes"])
+        if rc != 0:
+            return {}
+        result: dict[str, float] = {}
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                try:
+                    result[parts[0].strip()] = float(parts[1].strip())
+                except ValueError:
+                    continue
+        return result
+
+    def wan_ip(self) -> Optional[str]:
+        """Address on the WAN interface, i.e. the IP the tunnel egresses from.
+
+        Changes here (DHCP lease, failover, mobile APN) are worth an event:
+        the phone's direct-connection hint goes stale the moment it moves.
+        """
+        rc, out = self.runner.run(["ip", "-4", "-o", "addr", "show", "dev", self.wan_interface])
+        if rc != 0:
+            return None
+        tokens = out.split()
+        for i, token in enumerate(tokens):
+            if token == "inet" and i + 1 < len(tokens):
+                return tokens[i + 1].split("/")[0]
+        return None
+
     def sync_peers(self, desired: Iterable[PeerSpec]) -> dict:
         """Make the local peer set match the Cloud's desired state.
 

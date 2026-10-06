@@ -100,6 +100,26 @@ class GatewayEventIn(BaseModel):
     payload: Optional[Dict[str, Any]] = None
 
 
+class GatewayEventItem(BaseModel):
+    """One row read back out of the gateway's local spool.
+
+    `event_id` is minted by the gateway when it records the event and is what
+    makes a resent batch a duplicate instead of a second copy; `recorded_at` is
+    the gateway's clock at that moment (the server also stores when *it* saw
+    the row). See GATEWAY_EVENT_CACHE.md.
+    """
+    event_id: str = Field(..., min_length=8, max_length=36)
+    recorded_at: str = Field(..., min_length=8, max_length=40)
+    type: str = Field(..., min_length=1, max_length=60)
+    payload: Optional[Dict[str, Any]] = None
+
+
+class GatewayEventBatchIn(BaseModel):
+    # Batch size/byte caps come from settings, so they are checked by the
+    # endpoint rather than baked into this schema.
+    events: List[GatewayEventItem] = Field(..., min_length=1)
+
+
 class ConnectionCreate(BaseModel):
     gateway_id: UUID
     connection_path: str = "unknown"

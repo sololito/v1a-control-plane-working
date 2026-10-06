@@ -4,8 +4,10 @@ Production: pairing attempt limits, entitlement caps, nonce replay protection,
 rate-limited register/claim/heartbeat.
 """
 import json
-from datetime import datetime, timedelta
+import uuid
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from app import models, schemas
 from app.billing import PLANS
@@ -214,17 +216,132 @@ def gateway_config(gateway_id: str, gw: models.Gateway = Depends(get_current_gat
 
 
 @router.post("/gateways/{gateway_id}/events")
-def gateway_event(gateway_id: str, body: schemas.GatewayEventIn,
+def gateway_event(gateway_id: str, body: schemas.GatewayEventIn, request: Request,
                   gw: models.Gateway = Depends(get_current_gateway),
                   db: Session = Depends(get_db)):
     if str(gw.id) != str(gateway_id):
         raise HTTPException(status_code=403, detail="gateway mismatch")
     if len(body.event_type) > 60:
         raise HTTPException(status_code=422, detail="event_type too long")
+    # received_at/remote_ip mark this as a row the *gateway* reported, the same
+    # split the batch route uses: rows the Cloud writes itself (heartbeat,
+    # registered, …) keep both NULL and are never shown as sensor claims.
     db.add(models.GatewayEvent(gateway_id=gw.id, event_type=body.event_type,
-                               payload=json.dumps(body.payload or {})[:8000]))
+                               payload=json.dumps(body.payload or {})[:8000],
+                               received_at=datetime.utcnow(),
+                               remote_ip=client_ip(request)))
     db.commit()
     return {"ok": True}
+
+
+def _iso_utc(value: str) -> datetime | None:
+    """Parse an ISO-8601 timestamp from a gateway into naive UTC.
+
+    The sensor's clock is whatever the box has (often pre-NTP), so an offset is
+    honoured but an unparseable value is a client error, not a reason to drop
+    the whole batch later with a database error.
+    """
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00").replace("z", "+00:00"))
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(tz=timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+@router.post("/gateways/{gateway_id}/events/batch")
+def gateway_events_batch(gateway_id: str, body: schemas.GatewayEventBatchIn,
+                         request: Request,
+                         gw: models.Gateway = Depends(get_current_gateway),
+                         db: Session = Depends(get_db)):
+    """Store-and-forward backfill: the gateway's local spool emptied into the
+    ledger after it could reach the Cloud again.
+
+    Deduplicated on (gateway_id, event_id), so a batch that was stored but
+    whose response was lost is a no-op on the retry — the agent only trims its
+    spool after a 2xx. See GATEWAY_EVENT_CACHE.md.
+    """
+    if str(gw.id) != str(gateway_id):
+        raise HTTPException(status_code=403, detail="gateway mismatch")
+    check_rate(f"gw_events:{gw.id}", client_ip(request), settings.gateway_rate_per_minute)
+
+    max_events = settings.event_batch_max_events
+    if len(body.events) > max_events:
+        raise HTTPException(status_code=422,
+                            detail=f"batch too large: {len(body.events)} > {max_events} events")
+
+    # Validate everything before touching the session: a half-accepted batch
+    # would make the agent's "stored" count disagree with what it still holds.
+    parsed = []
+    total_bytes = 0
+    for ev in body.events:
+        try:
+            uuid.UUID(ev.event_id)
+        except (ValueError, TypeError):
+            raise HTTPException(status_code=422, detail="event_id must be a UUID")
+        recorded = _iso_utc(ev.recorded_at)
+        if recorded is None:
+            raise HTTPException(status_code=422,
+                                detail="recorded_at must be an ISO-8601 timestamp")
+        payload = json.dumps(ev.payload or {}, default=str)
+        if len(payload) > 8192:
+            raise HTTPException(status_code=422,
+                                detail=f"event {ev.type!r} payload too large")
+        total_bytes += len(payload) + len(ev.event_id)
+        parsed.append((ev.event_id, ev.type, recorded, payload))
+    if total_bytes > settings.event_batch_max_bytes:
+        raise HTTPException(status_code=422,
+                            detail=f"batch too large: {total_bytes} > "
+                                   f"{settings.event_batch_max_bytes} bytes")
+
+    now = datetime.utcnow()
+    ip = client_ip(request)
+    ids = [p[0] for p in parsed]
+    existing = {row for (row,) in db.query(models.GatewayEvent.event_id).filter(
+        models.GatewayEvent.gateway_id == gw.id,
+        models.GatewayEvent.event_id.in_(ids)).all()}
+
+    stored = duplicates = 0
+    for event_id, event_type, recorded, payload in parsed:
+        if event_id in existing:
+            duplicates += 1
+            continue
+        db.add(models.GatewayEvent(gateway_id=gw.id, event_type=event_type,
+                                   payload=payload, event_id=event_id,
+                                   created_at=recorded, received_at=now, remote_ip=ip))
+        stored += 1
+    if stored:
+        # One audit row per drain, not one per event: this records that the
+        # sensor shipped evidence, and the evidence itself is the batch.
+        _audit(db, "gateway", str(gw.id), "gateway.events_batch", str(gw.id),
+               detail=json.dumps({"stored": stored, "duplicates": duplicates}), ip=ip)
+    try:
+        db.commit()
+    except IntegrityError:
+        # Another copy of the same batch landed between our check and the
+        # insert. Re-insert row by row so only the genuinely new rows are lost
+        # to the conflict — and they are not lost, they are already stored.
+        db.rollback()
+        stored = duplicates = 0
+        for event_id, event_type, recorded, payload in parsed:
+            if db.query(models.GatewayEvent.id).filter(
+                    models.GatewayEvent.gateway_id == gw.id,
+                    models.GatewayEvent.event_id == event_id).first():
+                duplicates += 1
+                continue
+            try:
+                with db.begin_nested():
+                    db.add(models.GatewayEvent(
+                        gateway_id=gw.id, event_type=event_type, payload=payload,
+                        event_id=event_id, created_at=recorded, received_at=now,
+                        remote_ip=ip))
+            except IntegrityError:
+                duplicates += 1
+            else:
+                stored += 1
+        db.commit()
+    return {"ok": True, "stored": stored, "duplicates": duplicates}
 
 
 @router.get("/gateways/{gateway_id}/sessions")

@@ -19,6 +19,6 @@
 - [x] Admin audit trail: device IP/IMEI/MAC logging, first-ten-sites per tunnel session,
   filtered `/admin/audit`, per-tunnel JSON + printable report (`/admin/tunnels/{id}/audit/print`).
 - [ ] ESP32 pairing firmware + mobile CONNECT_TO_HOME_GATEWAY flow against this API.
-- [ ] Gateway event cache: local JSONL spool + `POST /gateways/{id}/events/batch`
+- [x] Gateway event cache: local JSONL spool + `POST /gateways/{id}/events/batch`
   backfill so gateway-observed events survive a cloud outage — spec and checklist
   in `GATEWAY_EVENT_CACHE.md` (cloud stays the ledger, gateway is a sensor).

@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from app import jobs, models
-from app.audit_report import build_tunnel_report, render_report_html
+from app.audit_report import build_tunnel_report, gateway_event_row, render_report_html
 from app.config import get_settings
 from app.db import SessionLocal, get_db
 from app.deps import require_admin
@@ -256,6 +256,38 @@ def session_audit_print(session_id: str, _=Depends(require_admin),
         report, title=f"Tunnel session audit — {str(sess.id)[:8]}"))
 
 
+@router.get("/gateways/{gateway_id}/events")
+def gateway_events(gateway_id: str, _=Depends(require_admin), db: Session = Depends(get_db),
+                   since: datetime | None = None, until: datetime | None = None,
+                   event_type: str | None = Query(None, alias="type"),
+                   limit: int = Query(200, ge=1, le=500)):
+    """Raw evidence the gateway itself reported: peer changes, handshakes, NAT
+    failures, WAN changes — including anything it queued while the Cloud was
+    unreachable and shipped afterwards (GATEWAY_EVENT_CACHE.md).
+
+    Rows are claims by the sensor, not server-observed facts, so each one is
+    returned with both the gateway's timestamp and the Cloud's.
+    """
+    gw = _gateway_or_404(db, gateway_id)
+    # received_at is both the Cloud's timestamp and the provenance flag: rows
+    # the Cloud wrote itself (heartbeat, registered, ...) are not sensor claims
+    # and belong to the audit trail above, not here.
+    q = db.query(models.GatewayEvent).filter(
+        models.GatewayEvent.gateway_id == gw.id,
+        models.GatewayEvent.received_at.isnot(None))
+    if since:
+        q = q.filter(models.GatewayEvent.created_at >= since)
+    if until:
+        q = q.filter(models.GatewayEvent.created_at <= until)
+    if event_type:
+        q = q.filter(models.GatewayEvent.event_type == event_type)
+    total = q.count()
+    rows = q.order_by(models.GatewayEvent.created_at.desc()).limit(limit).all()
+    return {"total": total, "gateway_id": str(gw.id),
+            "note": "gateway-reported (unverified)",
+            "items": [gateway_event_row(r) for r in rows]}
+
+
 @router.get("/stats")
 def stats(_=Depends(require_admin), db: Session = Depends(get_db)):
     return {
@@ -364,6 +396,7 @@ def sweep(_=Depends(require_admin)):
     try:
         expired = jobs.expire_sessions(db)
         offline = jobs.mark_offline_gateways(db)
-        return {"expired": expired, "marked_offline": offline}
+        pruned = jobs.prune_gateway_events(db, get_settings().gateway_event_retention_days)
+        return {"expired": expired, "marked_offline": offline, "events_pruned": pruned}
     finally:
         db.close()

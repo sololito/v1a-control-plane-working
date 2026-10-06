@@ -1,7 +1,7 @@
 # Gateway event cache — store-and-forward backfill
 
-Status: spec (not implemented). Decides where gateway-observed records live and
-how they survive a cloud outage.
+Status: implemented (agent spool, batch endpoint, retention, audit surfaces;
+tests in `tests/test_event_{spool,batch,backfill}.py`).
 
 ## 0. The rule this design follows
 
@@ -34,7 +34,8 @@ and `app/gateway/daemon.py`):
 | `wg_iface_down` | `interface_up()` false during sync | `iface` |
 | `sync_error` | `sync_once` raised or returned errors | `error` (≤300 chars) |
 | `token_refreshed` | bearer refresh after 401 | — |
-| `spool_overflow` | local spool hit its cap, oldest rows dropped | `dropped`, `bytes` |
+| `event_batch_rejected` | Cloud answered 422 to a batch (our rows broke the contract) | `detail` (≤300 chars) |
+| `spool_overflow` | local queue hit its cap, oldest rows dropped | `dropped`, `bytes` (carried forward from any marker dropped with them) |
 
 Never captured: packet payloads, full URLs, DNS queries, credentials, keys.
 The data-plane stays dark; this is liveness and change evidence only.
@@ -66,11 +67,19 @@ unwritable).
 - Append durability matches the existing `state.json` style: one `write()` +
   `flush()` per line; no per-event fsync (a power cut may lose the tail of the
   spool, never the spool's earlier contents).
-- **Rotation:** roll to `events-<utc>.jsonl.bak` at 1 MB or 5000 lines; keep at
-  most 3 rotated files plus the active one.
-- **Cap:** 5 MB total. On overflow drop oldest first and append one
-  `spool_overflow` event recording how many were lost — an explicit gap marker
-  beats silent loss.
+- **Rotation:** at 1 MB or 5000 lines the active file is renamed
+  `events-<seq>-<utc>.jsonl`, where `<seq>` is 000001, 000002, … continued from
+  whatever is on disk. The sequence, not the clock, keeps segments ordered: an
+  `ack` rewrites a segment and would otherwise push an older one behind a newer
+  one. At most 3 rotated files are kept beside the active one — and **a rotated
+  file is still part of the queue**: `pending()`/`batch()` read every segment
+  oldest-first and `ack()` trims whichever held the confirmed rows, so rotation
+  never orphans an unshipped backlog.
+- **Cap:** 5 MB total. On overflow the oldest segment goes first (then the
+  oldest lines of the active file, as one contiguous newest run) and one
+  `spool_overflow` event recording how many were lost is appended — an explicit
+  gap marker beats silent loss. A marker that is itself dropped hands its
+  counts forward, so the announced gap never shrinks.
 - **Corruption:** a truncated/garbage line is skipped at read time with a
   `[spool] skipping bad line` warning; never fatal.
 - The spool holds only events, never tokens or keys (it sits beside, not
@@ -93,8 +102,10 @@ auth, gateway-id match enforced as on every other gateway route.
 Response: `{"ok": true, "stored": 18, "duplicates": 2}`.
 
 - **Trigger:** one batch attempt after a *successful* heartbeat, only when the
-  spool holds ≥1 events, and only if ≥20 events are pending or ≥30 s since the
-  last attempt. Timeout 5 s. It runs in the existing loop — no second thread.
+  queue holds ≥1 events, and only if ≥20 events are pending or ≥30 s since the
+  last attempt. With no attempt yet recorded the batch goes out immediately —
+  a backlog carried over from the last run matters at startup. Timeout 5 s. It
+  runs in the existing loop — no second thread.
 - **Ack is implicit:** the agent deletes the batch from the spool only after a
   2xx. A lost response means the next attempt re-sends the same rows and the
   server drops them as duplicates. No `last_seq` handshake to get wrong.
@@ -126,6 +137,13 @@ CREATE UNIQUE INDEX uq_gw_event_id ON gateway_events (gateway_id, event_id)
   server-observed, same split used for `ip_hint` vs `remote_ip` on heartbeats.
 - Duplicate `event_id` in the same batch or across batches → counted in
   `duplicates`, not an error.
+- **Provenance:** `received_at` doubles as the flag that says *who wrote this
+  row*. Non-NULL means the gateway sent it (batch, or the single-event
+  `POST /gateways/{id}/events`, which now stamps `received_at`/`remote_ip`
+  too); NULL means the Cloud wrote it itself (`heartbeat`, `registered`,
+  `claimed`, `nonce_resync`, `revoked`, `wg_public_key_registered`, …). The
+  admin query and the report's gateway section filter on it, so a row the
+  server observed is never presented as a sensor claim.
 
 **Retention:** new job `prune_gateway_events(db, days)` in `app/jobs.py`,
 registered in `app/maintenance.py`, config
@@ -178,17 +196,17 @@ tell which is which.
 
 ## 8. Implementation checklist
 
-- [ ] `migrations/008_gateway_event_batch.sql` (+ baseline list in `alembic/env.py`)
-- [ ] `app/schemas.py`: `GatewayEventBatchIn`
-- [ ] `app/routers/gateways.py`: `POST /gateways/{gateway_id}/events/batch` (+ audit action `gateway.events_batch`)
-- [ ] `app/config.py`: `gateway_event_retention_days`, `event_batch_max_events`, `event_batch_max_bytes`
-- [ ] `app/jobs.py::prune_gateway_events` + registration in `app/maintenance.py`
-- [ ] `firmware/linux_gateway/gateway_agent.py`: `EventSpool` (append / read / trim / rotate / cap), emit points, batch ship in the loop
-- [ ] `app/gateway/daemon.py`: emit `peer_added`/`peer_removed`/`sync_error` from `sync_once` results
-- [ ] `app/audit_report.py`: `gateway_events` section; `app/routers/admin.py`: events query; `app/static/admin.html`: events table
-- [ ] `API.md` + `ARCHITECTURE.md` + `.env.example`
-- [ ] Tests (§9)
-- [ ] `TODO_NEXT_PHASE.md` tick
+- [x] `migrations/008_gateway_event_batch.sql` (+ baseline note in `alembic/env.py`)
+- [x] `app/schemas.py`: `GatewayEventBatchIn`
+- [x] `app/routers/gateways.py`: `POST /gateways/{gateway_id}/events/batch` (+ audit action `gateway.events_batch`)
+- [x] `app/config.py`: `gateway_event_retention_days`, `event_batch_max_events`, `event_batch_max_bytes`
+- [x] `app/jobs.py::prune_gateway_events` + registration in `app/maintenance.py`
+- [x] `firmware/linux_gateway/gateway_agent.py`: `EventSpool` (append / read / trim / rotate / cap), emit points, batch ship in the loop
+- [x] `app/gateway/daemon.py`: emit `peer_added`/`peer_removed`/`sync_error` from `sync_once` results
+- [x] `app/audit_report.py`: `gateway_events` section; `app/routers/admin.py`: events query; `app/static/admin.html`: events table
+- [x] `API.md` + `ARCHITECTURE.md` + `.env.example`
+- [x] Tests (§9)
+- [x] `TODO_NEXT_PHASE.md` tick
 
 ## 9. Test plan
 
