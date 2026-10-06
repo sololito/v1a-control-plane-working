@@ -41,6 +41,10 @@ $env:SECRET_KEY="long-random-prod-secret-min-32-chars"; docker compose up --buil
   and the **first ten sites** it visited per tunnel session (`device_visits`).
 - Admin portal (`/admin`): audit filters, device identifier search, and a **printable
   audit report per tunnel** (`/api/v1/admin/tunnels/{id}/audit/print`).
+- Android test client (`mobile/`, Kotlin + Compose): control-plane milestone that proves
+  auth/gateway/session/signalling against this API and hands the tunnel config to the
+  official WireGuard app — builds a debug APK with `./gradlew :app:assembleDebug`, see
+  `mobile/README.md`.
 
 See ARCHITECTURE.md, API.md, MOBILE_APP_FOUNDATION.md, SECURITY.md, DEPLOYMENT.md, TODO_NEXT_PHASE.md.
 # v1a-control-plane-working

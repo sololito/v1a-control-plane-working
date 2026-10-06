@@ -31,3 +31,6 @@ Thumbs.db
 # Local tooling
 .vscode/
 .idea/
+
+# Mobile/Android (see mobile/.gitignore for the rest)
+.toolchain/
