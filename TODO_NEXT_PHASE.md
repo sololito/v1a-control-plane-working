@@ -13,4 +13,9 @@
   - [ ] Prod: switch `MPESA_ENV=production`, Lipa-na-M-Pesa shortcode/passkey, IP-allowlist + callback auth, C2B reconcile
 - [ ] Partner/public hotspot policy in authz.py + tests.
 - [x] Admin UI (minimal) + Prometheus metrics + alerting on offline/failed sessions.
+- [x] Mobile app foundation: client supplies its own initial internet access to reach the
+  cloud, then joins the tunnel (`MOBILE_APP_FOUNDATION.md`); `POST /me/device-identity` +
+  `POST /me/visits` contract in place.
+- [x] Admin audit trail: device IP/IMEI/MAC logging, first-ten-sites per tunnel session,
+  filtered `/admin/audit`, per-tunnel JSON + printable report (`/admin/tunnels/{id}/audit/print`).
 - [ ] ESP32 pairing firmware + mobile CONNECT_TO_HOME_GATEWAY flow against this API.

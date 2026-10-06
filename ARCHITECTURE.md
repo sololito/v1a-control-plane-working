@@ -21,8 +21,11 @@ Components map 1:1 to Guide §1. Each router+service has clear boundary so it ca
 - Policy layer `app/authz.py`: V1 `PERSONAL_GATEWAY` (owner check); future types raise 403 with explicit TODO.
 - Entitlements: `User -> Subscription -> entitlements JSON -> connection auth`. No payment provider coupling.
 - Observability: structured logs, /health /ready /metrics stub, audit_logs + gateway/session events.
+- Audit trail: `user_devices` keeps server-observed IP + self-reported IMEI/MAC; `device_visits`
+  keeps the first ten sites per tunnel session; `app/audit_report.py` renders the per-tunnel
+  JSON/printable report (`/admin/tunnels/{id}/audit[/print]`). See MOBILE_APP_FOUNDATION.md.
 
 ## ER (summary)
-users(1)-*(user_devices, gateways?, connection_sessions, subscriptions); gateways(1)-*(credentials, events); connection_sessions(1)-*(session_events); audit_logs append-only.
+users(1)-*(user_devices, gateways?, connection_sessions, subscriptions); gateways(1)-*(credentials, events); connection_sessions(1)-*(session_events, device_visits); gateways(1)-*(device_visits); audit_logs append-only.
 
 Scaling: stateless API replicas + Postgres indexes + Redis for ephemeral/rate-limit + job abstraction. No in-memory session truth.

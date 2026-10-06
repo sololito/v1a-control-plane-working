@@ -8,6 +8,7 @@ from app import models, schemas
 from app.config import get_settings
 from app.db import get_db
 from app.deps import get_current_user_device
+from app.forensics import normalize_imei, normalize_mac
 from app.ratelimit import check_rate, client_ip
 from app.security import (
     create_access_token, create_refresh_token, decode_strict,
@@ -41,7 +42,8 @@ def _clear_fails(email: str, ip: str):
     _fails.pop(_fail_key(email, ip), None)
 
 
-def _issue(user: models.User, dev: models.UserDevice, db: Session):
+def _issue(user: models.User, dev: models.UserDevice, db: Session,
+           ip: str | None = None):
     access = create_access_token(str(user.id), str(dev.id))
     refresh = create_refresh_token(str(user.id), str(dev.id))
     # Keep previous hash for 30s so a retried/concurrent refresh doesn't look like theft.
@@ -50,9 +52,11 @@ def _issue(user: models.User, dev: models.UserDevice, db: Session):
         dev.refresh_prev_at = datetime.utcnow()
     dev.refresh_token_hash = sha256_hex(refresh)
     dev.last_seen = datetime.utcnow()
+    if ip:  # audit trail: address this device actually reached us from
+        dev.ip_address = ip
     db.add(dev)
     db.add(models.AuditLog(actor_type="user", actor_id=str(user.id), action="auth.token_issued",
-                           resource_type="user_device", resource_id=str(dev.id)))
+                           resource_type="user_device", resource_id=str(dev.id), ip=ip))
     db.commit()
     return {"access_token": access, "refresh_token": refresh,
             "device_id": dev.id, "user_id": user.id}
@@ -68,7 +72,9 @@ def register(body: schemas.RegisterRequest, request: Request, db: Session = Depe
                        display_name=(body.display_name or "").strip()[:120] or None)
     db.add(user)
     db.flush()
-    dev = models.UserDevice(user_id=user.id, device_name=body.device_name.strip()[:80])
+    dev = models.UserDevice(user_id=user.id, device_name=body.device_name.strip()[:80],
+                            ip_address=client_ip(request), imei=normalize_imei(body.imei),
+                            mac_address=normalize_mac(body.mac_address))
     db.add(dev)
     db.flush()
     sub = models.Subscription(user_id=user.id, plan="free", status="active",
@@ -78,7 +84,7 @@ def register(body: schemas.RegisterRequest, request: Request, db: Session = Depe
                            ip=client_ip(request)))
     db.commit()
     db.refresh(dev)
-    return _issue(user, dev, db)
+    return _issue(user, dev, db, ip=client_ip(request))
 
 
 @router.post("/login", response_model=schemas.TokenResponse)
@@ -96,7 +102,9 @@ def login(body: schemas.LoginRequest, request: Request, db: Session = Depends(ge
     if not user.is_active:
         raise HTTPException(status_code=403, detail="user disabled")
     _clear_fails(email, client_ip(request))
-    dev = models.UserDevice(user_id=user.id, device_name=body.device_name.strip()[:80])
+    dev = models.UserDevice(user_id=user.id, device_name=body.device_name.strip()[:80],
+                            ip_address=client_ip(request), imei=normalize_imei(body.imei),
+                            mac_address=normalize_mac(body.mac_address))
     db.add(dev)
     db.flush()
     db.add(models.AuditLog(actor_type="user", actor_id=str(user.id), action="auth.login",
@@ -104,7 +112,7 @@ def login(body: schemas.LoginRequest, request: Request, db: Session = Depends(ge
                            ip=client_ip(request)))
     db.commit()
     db.refresh(dev)
-    return _issue(user, dev, db)
+    return _issue(user, dev, db, ip=client_ip(request))
 
 
 @router.post("/refresh", response_model=schemas.TokenResponse)
@@ -128,7 +136,7 @@ def refresh(body: schemas.RefreshRequest, request: Request, db: Session = Depend
         h = sha256_hex(body.refresh_token)
         if (dev.refresh_prev_hash == h and dev.refresh_prev_at and
                 datetime.utcnow() - dev.refresh_prev_at < timedelta(seconds=30)):
-            return _issue(user, dev, db)
+            return _issue(user, dev, db, ip=client_ip(request))
         # Reuse/theft: revoke device immediately.
         dev.status = "revoked"
         dev.refresh_token_hash = None
@@ -139,7 +147,7 @@ def refresh(body: schemas.RefreshRequest, request: Request, db: Session = Depend
                                ip=client_ip(request)))
         db.commit()
         raise HTTPException(status_code=401, detail="refresh reused — device revoked")
-    return _issue(user, dev, db)
+    return _issue(user, dev, db, ip=client_ip(request))
 
 
 @router.post("/logout")

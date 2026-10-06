@@ -1,7 +1,7 @@
 """Connection/session signalling API. Production: entitlement caps, pagination, strict validation."""
 import json
 from datetime import datetime, timedelta
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 from app import models, schemas
 from app.authz import can_access_gateway, check_subscription_entitlement
@@ -9,6 +9,7 @@ from app.config import get_settings
 from app.db import get_db
 from app.deps import get_current_gateway, get_current_user_device
 from app.security import create_session_token, decode_strict, sha256_hex
+from app.ratelimit import client_ip
 from app.tunnel import get_tunnel_provider
 
 router = APIRouter(tags=["connections"])
@@ -44,10 +45,11 @@ def _entitlements(db: Session, user_id) -> dict:
 
 
 @router.post("/connections", response_model=None)
-async def create_connection(body: schemas.ConnectionCreate,
+async def create_connection(body: schemas.ConnectionCreate, request: Request,
                             user_dev=Depends(get_current_user_device),
                             db: Session = Depends(get_db)):
     user, dev = user_dev
+    ip = client_ip(request)
     gw = db.query(models.Gateway).filter(models.Gateway.id == body.gateway_id).first()
     if not gw:
         raise HTTPException(status_code=404, detail="gateway not found")
@@ -56,7 +58,7 @@ async def create_connection(body: schemas.ConnectionCreate,
     if not _online(gw):
         db.add(models.AuditLog(actor_type="user", actor_id=str(user.id),
                                action="connection.rejected_offline",
-                               resource_type="gateway", resource_id=str(gw.id)))
+                               resource_type="gateway", resource_id=str(gw.id), ip=ip))
         db.commit()
         raise HTTPException(status_code=409, detail="gateway offline")
     if body.connection_path not in ("direct", "relay", "unknown", "failed"):
@@ -81,7 +83,7 @@ async def create_connection(body: schemas.ConnectionCreate,
     db.add(models.SessionEvent(session_id=sess.id, event="authorized",
                                detail=json.dumps({"path": sess.connection_path, "tunnel": creds})))
     db.add(models.AuditLog(actor_type="user", actor_id=str(user.id), action="connection.create",
-                           resource_type="connection_session", resource_id=str(sess.id)))
+                           resource_type="connection_session", resource_id=str(sess.id), ip=ip))
     db.commit()
     db.refresh(sess)
     try:

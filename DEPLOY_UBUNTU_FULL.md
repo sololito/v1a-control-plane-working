@@ -54,7 +54,7 @@ RELAY_PORT_END=20999
 CORS_ORIGINS=*
 ```
 
-Apply the DB schema (including 005 V1B):
+Apply the DB schema (including 006, which purges stored WireGuard private keys, and 007, the device forensics + visited-site audit tables):
 
 ```bash
 ./venv/bin/python - <<'PY'
@@ -62,7 +62,8 @@ import sqlite3
 c = sqlite3.connect("odivora_home.db")
 for f in ["migrations/001_init.sql","migrations/002_billing.sql",
           "migrations/003_production.sql","migrations/004_crypto_signalling.sql",
-          "migrations/005_v1b_wireguard.sql"]:
+          "migrations/005_v1b_wireguard.sql","migrations/006_no_wg_private_key.sql",
+          "migrations/007_device_audit.sql"]:
     for line in open(f):
         s = line.strip()
         if s.startswith(("ALTER","CREATE")):
@@ -154,7 +155,9 @@ Follow the prompts:
    ```
 
 2. Paste the returned `gateway_token` into the setup script.
-3. Paste your user access token so it can call `generate-keys`.
+3. The setup script generates the WireGuard keypair **on the device** and
+   uploads only the public key to `wg-public-key`. The private key is never
+   sent to the server, so no user access token is needed for key setup.
 4. It writes:
    - `/etc/odivora/state.json` (gateway id, token, nonce counter)
    - `/etc/odivora/wg_private_key` (chmod 600)
@@ -252,7 +255,8 @@ sudo systemctl restart odivora-gateway      # C
 
 | Symptom | Likely cause / fix |
 |---------|--------------------|
-| `register gateway` 500 | DB missing V1B columns → apply `migrations/005_v1b_wireguard.sql` |
+| `register gateway` 500 | DB missing V1B columns → apply `migrations/005_v1b_wireguard.sql` and `006_no_wg_private_key.sql` |
+| `no such column: user_devices.imei` / admin Devices tab empty | DB predates the audit trail → apply `migrations/007_device_audit.sql` (or just restart: the app adds missing columns on startup) |
 | `stale nonce (replay?)` | daemon restarted; it auto-resyncs once. If looping, check only one daemon |
 | Phone authorizes but `wg show` empty | gateway daemon not running → `journalctl -u odivora-gateway`; relay control URL wrong in `.env` |
 | Tunnel up, no internet | `net.ipv4.ip_forward` off, or iptables NAT missing → `sudo iptables -t nat -L POSTROUTING -v` |

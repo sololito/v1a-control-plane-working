@@ -14,6 +14,9 @@ th{background:#f4f4f4}
 .alert-crit{background:#fde2e2}.alert-warn{background:#fff4d6}.alert-info{background:#e6f0ff}
 #login{max-width:360px}#err{color:#b00}.muted{color:#666;font-size:13px}
 section{display:none}section.on{display:block}
+.filters input{padding:4px 6px;margin-right:6px}
+.filters{margin:8px 0}
+code{background:#f2f2f2;padding:1px 4px}
 </style>
 </head>
 <body>
@@ -28,14 +31,31 @@ section{display:none}section.on{display:block}
 </section>
 <section id="app">
 <nav>
-<button data-t="active">Active users</button><button data-t="stats">Stats/Alerts</button><button data-t="gw">Gateways</button><button data-t="sess">Sessions</button><button data-t="audit">Audit</button><button data-t="ops">Ops</button>
+<button data-t="active">Active users</button><button data-t="stats">Stats/Alerts</button><button data-t="gw">Gateways</button><button data-t="tunnels">Tunnels</button><button data-t="devices">Devices</button><button data-t="sess">Sessions</button><button data-t="audit">Audit</button><button data-t="ops">Ops</button>
 </nav>
 <div id="panels">
 <div id="p-active"><h3>Active users (seen ≤15m)</h3><div id="t-active"></div></div>
 <div id="p-stats"><h3>Stats</h3><div id="t-stats"></div><h3>Alerts</h3><div id="t-alerts"></div></div>
 <div id="p-gw"><h3>Gateways</h3><div id="t-gw"></div></div>
+<div id="p-tunnels"><h3>Tunnels</h3>
+<p class="muted">One tunnel per home gateway. "Report" opens the printable audit report for that tunnel:
+sessions, device IP/IMEI/MAC, first ten sites visited, audit trail.</p>
+<div class="filters"><input id="tun-status" placeholder="filter status (online/offline/...)"><button id="tun-go">Refresh</button></div>
+<div id="t-tunnels"></div></div>
+<div id="p-devices"><h3>Devices</h3>
+<p class="muted">IP is observed by the server; IMEI/MAC are self-reported by the mobile app and unverified.</p>
+<div class="filters"><input id="dev-q" placeholder="search IP / IMEI / MAC / name"><button id="dev-go">Search</button></div>
+<div id="t-devices"></div></div>
 <div id="p-sess"><h3>Sessions</h3><div id="t-sess"></div></div>
-<div id="p-audit"><h3>Audit (latest)</h3><div id="t-audit"></div></div>
+<div id="p-audit"><h3>Audit trail</h3>
+<div class="filters">
+<input id="au-action" placeholder="action (e.g. auth.* )">
+<input id="au-ip" placeholder="IP address">
+<input id="au-rid" placeholder="resource id">
+<button id="au-go">Filter</button>
+<span id="au-total" class="muted"></span>
+</div>
+<div id="t-audit"></div></div>
 <div id="p-ops"><h3>Ops</h3><button id="sweep">Run sweep (expire+offline)</button> <span id="sweep-out" class="muted"></span>
 <p class="muted">Prometheus: <a href="/metrics/prometheus" target="_blank">/metrics/prometheus</a> · rules in <code>prometheus/alert_rules.yml</code></p></div>
 </div>
@@ -59,16 +79,42 @@ $("go").onclick=async()=>{err("");try{
   $("who").textContent=me.email;$("logout").style.display="";$("login").classList.remove("on");$("login").style.display="none";$("app").classList.add("on");$("app").style.display="block";tab("active");
 }catch(e){err(e.message)}};
 $("logout").onclick=()=>{sessionStorage.removeItem("adm_tok");location.reload()};
+
+// Fetch an authenticated HTML document and paint it into a fresh tab, then let
+// the report's own Print button drive window.print(). Keeps the bearer token
+// out of URLs/history.
+async function openAuthedHtml(path){
+  const r=await fetch(API+path,{headers:H()});
+  if(!r.ok)throw new Error(path+" -> "+r.status);
+  const html=await r.text();
+  const w=window.open("","_blank");
+  if(!w)throw new Error("popup blocked — allow popups for this site");
+  w.document.open();w.document.write(html);w.document.close();
+}
+
 async function load(name){err("");try{
   if(name==="active"){const u=await jget("/admin/users/active");$("t-active").innerHTML=u.length?("<table><tr><th>email</th><th>devices</th><th>recent</th><th>last seen</th><th>gateways</th><th>sessions</th><th></th></tr>"+u.map(x=>"<tr><td>"+esc(x.email)+"</td><td>"+x.devices_active+"</td><td>"+x.devices_seen_recently+"</td><td>"+esc(x.last_seen||"")+"</td><td>"+x.gateways_owned+"</td><td>"+x.sessions_active+"</td><td><button onclick=\"disUser('"+x.id+"')\">disable</button></td></tr>").join("")+"</table>"):"<p class=muted>No active users in window.</p>"}
   if(name==="stats"){const s=await jget("/admin/stats");$("t-stats").innerHTML="<pre>"+esc(JSON.stringify(s,null,2))+"</pre>";const a=await jget("/admin/alerts");$("t-alerts").innerHTML=a.alerts.length?a.alerts.map(x=>"<div class='alert-"+(x.severity==="critical"?"crit":x.severity==="warning"?"warn":"info")+"'>["+esc(x.severity)+"] "+esc(x.type)+" — "+esc(x.message)+"</div>").join(""):"<p class=muted>No alerts.</p>"}
   if(name==="gw"){const g=await jget("/admin/gateways?limit=50");$("t-gw").innerHTML="<table><tr><th>id</th><th>status</th><th>owner</th><th>last seen</th><th></th></tr>"+g.map(x=>"<tr><td>"+esc(x.id.slice(0,8))+"</td><td>"+esc(x.status)+"</td><td>"+esc((x.owner||"").slice(0,8))+"</td><td>"+esc(x.last_seen||"")+"</td><td><button onclick=\"revGw('"+x.id+"')\">revoke</button></td></tr>").join("")+"</table>"}
-  if(name==="sess"){const s=await jget("/admin/sessions?limit=50");$("t-sess").innerHTML="<table><tr><th>id</th><th>status</th><th>gateway</th><th>user</th><th></th></tr>"+s.map(x=>"<tr><td>"+esc(x.id.slice(0,8))+"</td><td>"+esc(x.status)+"</td><td>"+esc(x.gateway_id.slice(0,8))+"</td><td>"+esc(x.user_id.slice(0,8))+"</td><td><button onclick=\"revSess('"+x.id+"')\">revoke</button></td></tr>").join("")+"</table>"}
-  if(name==="audit"){const a=await jget("/admin/audit?limit=50");$("t-audit").innerHTML="<table><tr><th>action</th><th>actor</th><th>resource</th><th>at</th></tr>"+a.map(x=>"<tr><td>"+esc(x.action)+"</td><td>"+esc((x.actor||"").slice(0,12))+"</td><td>"+esc((x.resource||"").slice(0,12))+"</td><td>"+esc(x.at||"")+"</td></tr>").join("")+"</table>"}
+  if(name==="tunnels"){const st=$("tun-status").value.trim();const t=await jget("/admin/tunnels?limit=100"+(st?"&status="+encodeURIComponent(st):""));$("t-tunnels").innerHTML=t.length?"<table><tr><th>tunnel</th><th>owner</th><th>status</th><th>wg</th><th>tunnel IP</th><th>gateway IP</th><th>sessions</th><th>devices</th><th>sites</th><th>last handshake</th><th></th></tr>"+t.map(x=>"<tr><td>"+esc(x.gateway_id.slice(0,8))+"</td><td>"+esc(x.owner_email||"—")+"</td><td>"+esc(x.status)+"</td><td>"+esc(x.wg_status||"—")+"</td><td>"+esc(x.tunnel_ip||"—")+"</td><td>"+esc(x.remote_ip||"—")+"</td><td>"+x.sessions_total+" ("+x.sessions_active+" active)</td><td>"+x.devices_total+"</td><td>"+x.sites_recorded+"</td><td>"+esc(x.wg_last_handshake_at||"—")+"</td><td><button onclick=\"printTunnel('"+x.gateway_id+"')\">print report</button> <button onclick=\"jsonTunnel('"+x.gateway_id+"')\">json</button></td></tr>").join("")+"</table>":"<p class=muted>No tunnels yet.</p>"}
+  if(name==="devices"){const q=$("dev-q").value.trim();const d=await jget("/admin/devices?limit=100"+(q?"&q="+encodeURIComponent(q):""));$("t-devices").innerHTML=d.items.length?"<table><tr><th>device</th><th>owner</th><th>type</th><th>status</th><th>IP</th><th>IMEI</th><th>MAC</th><th>last seen</th></tr>"+d.items.map(x=>"<tr><td>"+esc(x.device_name)+"<br><span class=muted>"+esc(x.id.slice(0,8))+"</span></td><td>"+esc(x.email||"—")+"</td><td>"+esc(x.device_type)+"</td><td>"+esc(x.status)+"</td><td>"+esc(x.ip_address||"—")+"</td><td>"+esc(x.imei||"—")+"</td><td>"+esc(x.mac_address||"—")+"</td><td>"+esc(x.last_seen||"—")+"</td></tr>").join("")+"</table>":"<p class=muted>No devices match.</p>"}
+  if(name==="sess"){const s=await jget("/admin/sessions?limit=50");$("t-sess").innerHTML="<table><tr><th>id</th><th>status</th><th>gateway</th><th>user</th><th></th></tr>"+s.map(x=>"<tr><td>"+esc(x.id.slice(0,8))+"</td><td>"+esc(x.status)+"</td><td>"+esc(x.gateway_id.slice(0,8))+"</td><td>"+esc(x.user_id.slice(0,8))+"</td><td><button onclick=\"revSess('"+x.id+"')\">revoke</button> <button onclick=\"printSession('"+x.id+"')\">report</button></td></tr>").join("")+"</table>"}
+  if(name==="audit"){
+    const act=$("au-action").value.trim(),ip=$("au-ip").value.trim(),rid=$("au-rid").value.trim();
+    let p="/admin/audit?limit=100";if(act)p+="&action="+encodeURIComponent(act);if(ip)p+="&ip="+encodeURIComponent(ip);if(rid)p+="&resource_id="+encodeURIComponent(rid);
+    const a=await jget(p);$("au-total").textContent=a.total+" matching";
+    $("t-audit").innerHTML=a.items.length?"<table><tr><th>when</th><th>action</th><th>actor</th><th>resource</th><th>ip</th><th>detail</th></tr>"+a.items.map(x=>"<tr><td>"+esc(x.at||"")+"</td><td>"+esc(x.action)+"</td><td>"+esc((x.actor||"").slice(0,14))+"</td><td>"+esc((x.resource_type||"")+" "+(x.resource||"").slice(0,8))+"</td><td>"+esc(x.ip||"—")+"</td><td class=muted>"+esc((x.detail||"").slice(0,60))+"</td></tr>").join("")+"</table>":"<p class=muted>No audit rows.</p>"
+  }
 }catch(e){err(e.message)}}
 window.disUser=async id=>{if(!confirm("Disable user?"))return;await jpost("/admin/users/"+id+"/disable");load("active")};
 window.revGw=async id=>{if(!confirm("Revoke gateway?"))return;await jpost("/admin/gateways/"+id+"/revoke");load("gw")};
 window.revSess=async id=>{await jpost("/admin/sessions/"+id+"/revoke");load("sess")};
+window.printTunnel=async id=>{try{await openAuthedHtml("/admin/tunnels/"+id+"/audit/print")}catch(e){err(e.message)}};
+window.printSession=async id=>{try{await openAuthedHtml("/admin/sessions/"+id+"/audit/print")}catch(e){err(e.message)}};
+window.jsonTunnel=async id=>{try{const r=await jget("/admin/tunnels/"+id+"/audit");const w=window.open("","_blank");w.document.open();w.document.write("<pre>"+esc(JSON.stringify(r,null,2))+"</pre>");w.document.close()}catch(e){err(e.message)}};
+$("tun-go").onclick=()=>load("tunnels");
+$("dev-go").onclick=()=>load("devices");
+$("au-go").onclick=()=>load("audit");
 $("sweep").onclick=async()=>{const r=await jpost("/admin/jobs/sweep");$("sweep-out").textContent=JSON.stringify(r)};
 document.querySelectorAll("#panels>div").forEach(d=>d.style.display="none");
 </script>

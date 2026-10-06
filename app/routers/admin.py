@@ -1,7 +1,17 @@
-"""Admin: paginated lists, user/device/session control, stats, job sweep."""
+"""Admin: paginated lists, user/device/session control, stats, job sweep.
+
+Also owns the audit trail: filtered audit queries and the per-tunnel audit
+report (JSON + printable HTML) — see app/audit_report.py for the report shape.
+"""
+import json
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
 from app import jobs, models
+from app.audit_report import build_tunnel_report, render_report_html
+from app.config import get_settings
 from app.db import SessionLocal, get_db
 from app.deps import require_admin
 
@@ -88,11 +98,162 @@ def revoke_device_admin(device_id: str, _=Depends(require_admin), db: Session = 
 
 @router.get("/audit")
 def list_audit(_=Depends(require_admin), db: Session = Depends(get_db),
-               limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
-    rows = (db.query(models.AuditLog).order_by(models.AuditLog.created_at.desc())
-            .offset(offset).limit(limit).all())
-    return [{"action": r.action, "actor": r.actor_id, "resource": r.resource_id,
-             "at": r.created_at} for r in rows]
+               limit: int = Query(50, ge=1, le=500), offset: int = Query(0, ge=0),
+               action: str | None = Query(None, description="exact or 'prefix.*' match"),
+               actor: str | None = None, resource_type: str | None = None,
+               resource_id: str | None = None, ip: str | None = None,
+               since: datetime | None = None, until: datetime | None = None):
+    """Filtered audit trail. Every row keeps its IP and resource pointers so a
+    device, user or tunnel can be traced end to end."""
+    q = db.query(models.AuditLog)
+    if action:
+        if action.endswith("*"):
+            q = q.filter(models.AuditLog.action.like(action[:-1] + "%"))
+        else:
+            q = q.filter(models.AuditLog.action == action)
+    if actor:
+        q = q.filter(models.AuditLog.actor_id == actor)
+    if resource_type:
+        q = q.filter(models.AuditLog.resource_type == resource_type)
+    if resource_id:
+        q = q.filter(models.AuditLog.resource_id == resource_id)
+    if ip:
+        q = q.filter(models.AuditLog.ip == ip)
+    if since:
+        q = q.filter(models.AuditLog.created_at >= since)
+    if until:
+        q = q.filter(models.AuditLog.created_at <= until)
+    total = q.count()
+    rows = q.order_by(models.AuditLog.created_at.desc()).offset(offset).limit(limit).all()
+    return {"total": total, "limit": limit, "offset": offset,
+            "items": [{"id": str(r.id), "action": r.action, "actor_type": r.actor_type,
+                       "actor": r.actor_id, "resource_type": r.resource_type,
+                       "resource": r.resource_id, "ip": r.ip, "detail": r.detail,
+                       "at": r.created_at} for r in rows]}
+
+
+@router.get("/devices")
+def list_devices(_=Depends(require_admin), db: Session = Depends(get_db),
+                 limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
+                 user_id: str | None = None, status: str | None = None,
+                 q: str | None = Query(None, description="match IP / IMEI / MAC / name")):
+    """Every registered device with the identifiers needed for forensics."""
+    query = db.query(models.UserDevice)
+    if user_id:
+        query = query.filter(models.UserDevice.user_id == user_id)
+    if status:
+        query = query.filter(models.UserDevice.status == status)
+    if q:
+        like = f"%{q.strip()}%"
+        query = query.filter(models.UserDevice.ip_address.ilike(like) |
+                             models.UserDevice.imei.ilike(like) |
+                             models.UserDevice.mac_address.ilike(like) |
+                             models.UserDevice.device_name.ilike(like))
+    total = query.count()
+    rows = query.order_by(models.UserDevice.created_at.desc()).offset(offset).limit(limit).all()
+    users = {str(u.id): u.email for u in db.query(models.User).all()}
+    return {"total": total, "items": [{
+        "id": str(d.id), "user_id": str(d.user_id),
+        "email": users.get(str(d.user_id)),
+        "device_name": d.device_name, "device_type": d.device_type, "status": d.status,
+        "ip_address": d.ip_address, "imei": d.imei, "mac_address": d.mac_address,
+        "user_agent": d.user_agent, "last_seen": d.last_seen,
+        "identity_updated_at": d.identity_updated_at, "created_at": d.created_at,
+        "revoked_at": d.revoked_at} for d in rows]}
+
+
+@router.get("/tunnels")
+def list_tunnels(_=Depends(require_admin), db: Session = Depends(get_db),
+                 limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
+                 status: str | None = None):
+    """One row per tunnel (a tunnel terminates on one home gateway)."""
+    q = db.query(models.Gateway)
+    if status:
+        q = q.filter(models.Gateway.status == status)
+    rows = q.order_by(models.Gateway.created_at.desc()).offset(offset).limit(limit).all()
+    out = []
+    for g in rows:
+        sessions = db.query(models.ConnectionSession).filter(
+            models.ConnectionSession.gateway_id == g.id).all()
+        owner = db.query(models.User).filter(models.User.id == g.owner_user_id).first() \
+            if g.owner_user_id else None
+        active = ("requested", "authorized", "connecting", "connected")
+        device_ids = {s.device_id for s in sessions if s.device_id}
+        visits = db.query(models.DeviceVisit).filter(
+            models.DeviceVisit.gateway_id == g.id).count()
+        try:
+            meta = json.loads(g.ip_metadata or "{}") or {}
+        except Exception:
+            meta = {}
+        out.append({
+            "gateway_id": str(g.id), "status": g.status, "wg_status": g.wg_status,
+            "tunnel_ip": g.tunnel_ip, "wg_public_key": g.wg_public_key,
+            "remote_ip": meta.get("remote_ip") or meta.get("ip_hint"),
+            "wg_last_handshake_at": g.wg_last_handshake_at, "last_seen": g.last_seen,
+            "owner_id": str(g.owner_user_id) if g.owner_user_id else None,
+            "owner_email": owner.email if owner else None,
+            "sessions_total": len(sessions),
+            "sessions_active": sum(1 for s in sessions if s.status in active),
+            "devices_total": len(device_ids), "sites_recorded": visits,
+        })
+    return out
+
+
+def _gateway_or_404(db: Session, gateway_id: str) -> models.Gateway:
+    gw = db.query(models.Gateway).filter(models.Gateway.id == gateway_id).first()
+    if not gw:
+        raise HTTPException(status_code=404, detail="tunnel not found")
+    return gw
+
+
+@router.get("/tunnels/{gateway_id}/audit")
+def tunnel_audit(gateway_id: str, _=Depends(require_admin), db: Session = Depends(get_db),
+                 session_id: str | None = None,
+                 limit: int = Query(200, ge=1, le=500)):
+    """Full audit report for one tunnel: sessions, device identifiers
+    (IP/IMEI/MAC), first ten sites visited per session, and the audit trail."""
+    gw = _gateway_or_404(db, gateway_id)
+    session = None
+    if session_id:
+        session = db.query(models.ConnectionSession).filter(
+            models.ConnectionSession.id == session_id,
+            models.ConnectionSession.gateway_id == gw.id).first()
+        if not session:
+            raise HTTPException(status_code=404, detail="session not in this tunnel")
+    return build_tunnel_report(db, gw, session=session, audit_limit=limit)
+
+
+@router.get("/tunnels/{gateway_id}/audit/print", response_class=HTMLResponse)
+def tunnel_audit_print(gateway_id: str, _=Depends(require_admin),
+                       db: Session = Depends(get_db),
+                       session_id: str | None = None,
+                       limit: int = Query(200, ge=1, le=500)):
+    """Same report as a printable HTML document (one page per tunnel)."""
+    gw = _gateway_or_404(db, gateway_id)
+    session = None
+    if session_id:
+        session = db.query(models.ConnectionSession).filter(
+            models.ConnectionSession.id == session_id,
+            models.ConnectionSession.gateway_id == gw.id).first()
+        if not session:
+            raise HTTPException(status_code=404, detail="session not in this tunnel")
+    report = build_tunnel_report(db, gw, session=session, audit_limit=limit)
+    return HTMLResponse(render_report_html(report))
+
+
+@router.get("/sessions/{session_id}/audit/print", response_class=HTMLResponse)
+def session_audit_print(session_id: str, _=Depends(require_admin),
+                        db: Session = Depends(get_db),
+                        limit: int = Query(200, ge=1, le=500)):
+    """Printable audit report for a single tunnel session (one peer)."""
+    sess = db.query(models.ConnectionSession).filter(
+        models.ConnectionSession.id == session_id).first()
+    if not sess:
+        raise HTTPException(status_code=404, detail="session not found")
+    gw = _gateway_or_404(db, str(sess.gateway_id))
+    report = build_tunnel_report(db, gw, session=sess, audit_limit=limit)
+    return HTMLResponse(render_report_html(
+        report, title=f"Tunnel session audit — {str(sess.id)[:8]}"))
 
 
 @router.get("/stats")
