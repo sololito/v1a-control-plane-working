@@ -24,6 +24,13 @@ class Gateway(
     val lastSeen: String?,
 )
 
+class PendingPairing(
+    val gatewayId: String,
+    val deviceType: String,
+    val pairingCode: String,
+    val expiresAt: String?,
+)
+
 class SessionCreated(
     val id: String,
     val status: String,
@@ -95,7 +102,7 @@ class Api(private val prefs: Prefs) {
     }
 
     suspend fun gateways(): List<Gateway> {
-        val res = JSONArray(parseObject(call("me/gateways", "GET", null, authed = true)))
+        val res = JSONArray(call("me/gateways", "GET", null, authed = true))
         return (0 until res.length()).map { i ->
             val o = res.getJSONObject(i)
             Gateway(
@@ -104,6 +111,30 @@ class Api(private val prefs: Prefs) {
                 firmwareVersion = o.optString("firmware_version", null),
                 status = o.optString("status", "—"),
                 lastSeen = o.optString("last_seen", null),
+            )
+        }
+    }
+
+    suspend fun claimGateway(gatewayId: String, pairingCode: String) {
+        val body = JSONObject().put("pairing_code", pairingCode).toString()
+        call("me/gateways/$gatewayId/claim", "POST", body, authed = true)
+    }
+
+    /** Claim autofill candidates (server: PAIRING_PREFILL; absent -> empty). */
+    suspend fun pendingPairings(): List<PendingPairing> {
+        val raw = try {
+            call("me/pending-pairings", "GET", null, authed = true)
+        } catch (e: ApiException) {
+            if (e.code == 404) return emptyList() else throw e
+        }
+        val res = JSONArray(raw)
+        return (0 until res.length()).map { i ->
+            val o = res.getJSONObject(i)
+            PendingPairing(
+                gatewayId = o.getString("gateway_id"),
+                deviceType = o.optString("device_type", "—"),
+                pairingCode = o.getString("pairing_code"),
+                expiresAt = o.optString("expires_at", null),
             )
         }
     }

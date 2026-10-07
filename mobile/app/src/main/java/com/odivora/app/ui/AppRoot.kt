@@ -35,7 +35,6 @@ fun AppRoot() {
 
 private fun initialScreen(p: Prefs): String = when {
     p.hasSession -> "home"
-    p.baseUrl == Prefs.DEFAULT_BASE_URL -> "setup"
     else -> "auth"
 }
 

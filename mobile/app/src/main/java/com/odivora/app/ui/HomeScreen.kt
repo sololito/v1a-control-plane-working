@@ -12,14 +12,15 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import com.odivora.app.net.Gateway
@@ -30,8 +31,35 @@ fun HomeScreen(onOpenSession: (String) -> Unit, onLogout: () -> Unit) {
     var gateways by remember { mutableStateOf<List<Gateway>?>(null) }
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
+    var claimId by remember { mutableStateOf("") }
+    var claimCode by remember { mutableStateOf("") }
+    var claimRaw by remember { mutableStateOf("") }
+    var notice by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
     val client = api
+
+    // Prefill the claim box from the server's pending candidates. Only fills
+    // while both fields are blank: every fetch re-mints the pairing codes, so
+    // re-fetching over a user's typed-in code would invalidate it.
+    val fillPending: suspend () -> Boolean = {
+        var filled = false
+        if (claimId.isBlank() && claimCode.isBlank()) {
+            runCatching { client.pendingPairings() }.getOrDefault(emptyList())
+                .firstOrNull()?.let { p ->
+                    claimId = p.gatewayId
+                    claimCode = p.pairingCode
+                    filled = true
+                }
+        }
+        filled
+    }
+
+    LaunchedEffect(Unit) {
+        runCatching { gateways = client.gateways() }
+        if (fillPending()) {
+            notice = "Gateway ready to claim — tap Claim gateway."
+        }
+    }
 
     Column(
         modifier = Modifier
@@ -58,6 +86,9 @@ fun HomeScreen(onOpenSession: (String) -> Unit, onLogout: () -> Unit) {
                     message = null
                     try {
                         gateways = client.gateways()
+                        if (fillPending()) {
+                            notice = "Gateway ready to claim — tap Claim gateway."
+                        }
                     } catch (e: Exception) {
                         message = e.message ?: "unexpected error"
                     } finally {
@@ -106,5 +137,110 @@ fun HomeScreen(onOpenSession: (String) -> Unit, onLogout: () -> Unit) {
                 Spacer(Modifier.height(16.dp))
             }
         }
+
+        Spacer(Modifier.height(24.dp))
+        Text("Claim a gateway", style = MaterialTheme.typography.titleMedium)
+        Text(
+            "Filled in automatically after login while a gateway is waiting to be " +
+                "claimed — or paste the pairing info printed by the device " +
+                "(15 min TTL, 5 attempts).",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        OutlinedTextField(
+            value = claimRaw,
+            onValueChange = { raw ->
+                val parsed = parsePairing(raw)
+                if (parsed != null) {
+                    claimId = parsed.first
+                    claimCode = parsed.second
+                    claimRaw = ""
+                    notice = "Pairing info filled in below."
+                } else {
+                    claimRaw = raw
+                }
+            },
+            label = { Text("paste pairing info (gateway id + code)") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            value = claimId,
+            onValueChange = { v ->
+                val parsed = parsePairing(v)
+                if (parsed != null) {
+                    claimId = parsed.first
+                    claimCode = parsed.second
+                } else {
+                    claimId = v
+                }
+            },
+            label = { Text("gateway id") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        OutlinedTextField(
+            value = claimCode,
+            onValueChange = { v ->
+                val parsed = parsePairing(v)
+                if (parsed != null) {
+                    claimId = parsed.first
+                    claimCode = parsed.second
+                } else {
+                    claimCode = v
+                }
+            },
+            label = { Text("pairing code") },
+            singleLine = true,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        notice?.let {
+            Text(it, color = MaterialTheme.colorScheme.primary,
+                style = MaterialTheme.typography.bodySmall)
+        }
+        Button(
+            enabled = !busy && claimId.isNotBlank() && claimCode.isNotBlank(),
+            onClick = {
+                scope.launch {
+                    busy = true
+                    message = null
+                    notice = null
+                    try {
+                        client.claimGateway(claimId.trim(), claimCode.trim())
+                        gateways = client.gateways()
+                        claimId = ""
+                        claimCode = ""
+                        notice = "Gateway claimed."
+                        if (fillPending()) {
+                            notice = "Gateway claimed — next one ready below."
+                        }
+                    } catch (e: Exception) {
+                        message = e.message ?: "unexpected error"
+                    } finally {
+                        busy = false
+                    }
+                }
+            },
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+        ) { Text(if (busy) "Working…" else "Claim gateway") }
     }
+}
+
+private val UUID_RE =
+    Regex("[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}")
+private val LABELED_CODE_RE = Regex("(?i)(?:pairing\\s*code|code)\\D{0,12}(\\d{4,12})")
+private val SIX_DIGITS_RE = Regex("\\b\\d{6}\\b")
+private val ANY_CODE_RE = Regex("\\d{4,12}")
+
+/** Splits a pasted device line ("gateway_id=... PAIRING CODE: 123456") into (id, code). */
+private fun parsePairing(raw: String): Pair<String, String>? {
+    val id = UUID_RE.find(raw)?.value ?: return null
+    val rest = raw.replace(id, " ")
+    val code = LABELED_CODE_RE.find(raw)?.groupValues?.get(1)
+        ?: SIX_DIGITS_RE.find(rest)?.value
+        ?: ANY_CODE_RE.find(rest)?.value
+        ?: return null
+    return id to code
 }

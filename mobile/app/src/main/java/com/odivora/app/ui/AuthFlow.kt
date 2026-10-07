@@ -45,7 +45,7 @@ fun SetupScreen(onDone: () -> Unit) {
         OutlinedTextField(
             value = url,
             onValueChange = { url = it },
-            label = { Text("https://your-ngrok-url.ngrok.io") },
+            label = { Text("https://image-valley-sealed-donald.trycloudflare.com") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )

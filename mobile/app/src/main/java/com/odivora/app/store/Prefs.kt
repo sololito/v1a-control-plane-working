@@ -44,7 +44,7 @@ class Prefs(context: Context) {
     private fun prefsString(key: String): String? = sp.getString(key, null)
 
     companion object {
-        const val DEFAULT_BASE_URL = "https://your-ngrok-url.ngrok.io"
+        const val DEFAULT_BASE_URL = "https://image-valley-sealed-donald.trycloudflare.com"
 
         fun normalize(url: String): String {
             var u = url.trim().trimEnd('/')
