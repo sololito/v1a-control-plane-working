@@ -1,10 +1,17 @@
 package com.odivora.app.ui
 
+import android.Manifest
 import android.content.ClipboardManager
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
+import android.content.pm.PackageManager
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -31,12 +38,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.core.content.FileProvider
+import androidx.core.content.ContextCompat
 import com.odivora.app.net.WgAuth
 import com.odivora.app.net.WgConfig
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.IOException
 
 @Composable
 fun SessionScreen(sessionId: String, onBack: () -> Unit) {
@@ -54,6 +62,16 @@ fun SessionScreen(sessionId: String, onBack: () -> Unit) {
     var sitesInput by rememberSaveable { mutableStateOf("") }
     var visitNote by remember { mutableStateOf<String?>(null) }
     val client = api
+
+    val writePermLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission(),
+    ) { granted ->
+        if (granted) {
+            exportAndOpenWireGuard(context, sessionId, configText)
+        } else {
+            toast(context, "Storage access needed to save the .conf — use Copy or Share instead.")
+        }
+    }
 
     LaunchedEffect(sessionId) {
         val ws = client.openWs { msg ->
@@ -138,7 +156,18 @@ fun SessionScreen(sessionId: String, onBack: () -> Unit) {
         Row {
             Button(
                 enabled = auth != null && configText.isNotBlank(),
-                onClick = { openInWireGuard(context, sessionId, configText) },
+                onClick = {
+                    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q &&
+                        ContextCompat.checkSelfPermission(
+                            context,
+                            Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                        ) != PackageManager.PERMISSION_GRANTED
+                    ) {
+                        writePermLauncher.launch(Manifest.permission.WRITE_EXTERNAL_STORAGE)
+                    } else {
+                        exportAndOpenWireGuard(context, sessionId, configText)
+                    }
+                },
             ) { Text("Open in WireGuard") }
             OutlinedButton(
                 enabled = configText.isNotBlank(),
@@ -149,6 +178,12 @@ fun SessionScreen(sessionId: String, onBack: () -> Unit) {
                 onClick = { copyConfig(context, configText) },
             ) { Text("Copy") }
         }
+        Text(
+            "Saves the .conf to Downloads, then opens WireGuard — there tap + → " +
+                "Create from file or archive → Downloads.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
         OutlinedButton(
             onClick = {
                 scope.launch {
@@ -256,16 +291,60 @@ private fun Section(title: String) {
     )
 }
 
-private fun openInWireGuard(context: Context, sessionId: String, configText: String) {
-    val dir = File(context.cacheDir, "configs").apply { mkdirs() }
-    val file = File(dir, "odivora-$sessionId.conf")
-    file.writeText(configText)
-    val uri: Uri = FileProvider.getUriForFile(context, "com.odivora.app.fileprovider", file)
-    val intent = Intent(Intent.ACTION_VIEW)
-        .setDataAndType(uri, "application/x-wireguard-profile")
-        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-    runCatching { context.startActivity(intent) }
-        .onFailure { toast(context, "No app opens this profile here — use Share or Copy.") }
+private fun exportAndOpenWireGuard(context: Context, sessionId: String, configText: String) {
+    val name = "odivora-${sessionId.take(8)}.conf"
+    try {
+        saveToDownloads(context, name, configText)
+    } catch (e: Exception) {
+        toast(context, "Could not save $name — use Copy or Share instead.")
+        return
+    }
+    // The official WireGuard app declares no ACTION_VIEW filter (import is
+    // in-app only), so an implicit view intent can never reach it and greedy
+    // apps (WPS Office, …) capture it instead. Save the file, launch
+    // WireGuard explicitly, and let the user pick it from Downloads.
+    val launch = Intent(Intent.ACTION_MAIN).apply {
+        addCategory(Intent.CATEGORY_LAUNCHER)
+        setPackage("com.wireguard.android")
+    }
+    val opened = runCatching { context.startActivity(launch) }.isSuccess
+    toast(
+        context,
+        if (opened) {
+            "Saved Downloads/$name — tap + → Create from file or archive."
+        } else {
+            "Saved Downloads/$name — install WireGuard, then import it."
+        },
+    )
+}
+
+private fun saveToDownloads(context: Context, name: String, text: String) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        val resolver = context.contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.Downloads.DISPLAY_NAME, name)
+            put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+            put(MediaStore.Downloads.IS_PENDING, 1)
+        }
+        val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+            ?: throw IOException("could not create download entry")
+        try {
+            resolver.openOutputStream(uri)?.use {
+                it.write(text.toByteArray(Charsets.UTF_8))
+            } ?: throw IOException("could not write $uri")
+            values.clear()
+            values.put(MediaStore.Downloads.IS_PENDING, 0)
+            resolver.update(uri, values, null, null)
+        } catch (e: Exception) {
+            runCatching { resolver.delete(uri, null, null) }
+            throw e
+        }
+    } else {
+        @Suppress("DEPRECATION")
+        val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        dir.mkdirs()
+        File(dir, name).writeText(text)
+    }
 }
 
 private fun shareConfig(context: Context, configText: String) {
