@@ -13,6 +13,7 @@
 - POST /gateways/register {device_type,public_key,algorithm?,firmware_version?} -> {gateway_id,pairing_code,expires_at} (code shown once)
 - POST /me/gateways/{id}/claim {pairing_code} (auth) -> {gateway_token} (gateway bearer)
 - GET /me/gateways (auth)
+- GET /me/pending-pairings (auth) — claim autofill: unclaimed gateways + a freshly minted pairing code each call (hashed at rest, so the fetch rotates it). Only when `PAIRING_PREFILL=true` (404 otherwise); any authenticated user can claim any listed gateway while enabled, so keep it off outside trusted deployments.
 - POST /gateways/heartbeat (gateway auth) {firmware_version?,health?,ip_hint?,nonce?,wg_endpoint?} (nonce monotonic anti-replay; `wg_endpoint="host:port"` advertises a public endpoint to enable the direct path)
 - POST /gateways/{id}/wg-public-key (gateway auth) {wg_public_key} — register the device's OWN WireGuard public key (44-char base64). The private key is generated on-device and never leaves it. 409 if replacing the key while sessions are active.
 - POST /gateways/{id}/generate-keys — **410 Gone** (removed: it generated and stored gateway private keys server-side; use wg-public-key)
@@ -26,7 +27,7 @@
 - POST /me/gateways/{id}/grants {email,access_type} (owner) — PARTNER/BUSINESS share
 
 ## Connections (signalling; WS live + polling fallback)
-- POST /connections {gateway_id,connection_path?} (auth) -> {id,status=authorized,session_token,tunnel,expires_at} — 403 if not owner/granted/entitled/capped, 409 if offline
+- POST /connections {gateway_id,connection_path?} (auth) -> {id,status=authorized,session_token,tunnel,expires_at} — 403 if not owner/granted/entitled/capped, 409 if offline. When the cap is already reached and the user holds an active session on THIS gateway, the existing session is returned (`connection.resume`, fresh `session_token`) instead of 403; sessions past `expires_at` are swept to `expired` first so they never eat the cap.
 - GET /connections?limit&offset | GET /connections/{id} | PATCH /connections/{id} {status,reason?} | DELETE /connections/{id}
 - POST /connections/{id}/verify {gateway_id,session_token} (gateway) — pre-tunnel check
 - WS /ws/gateways/{id}?token= (gateway) + WS /ws/mobile?token= (user) — session events broadcast

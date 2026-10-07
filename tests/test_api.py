@@ -143,12 +143,24 @@ def test_offline_gateway_rejected_then_online_ok():
 
 def test_connection_lifecycle_and_concurrent():
     t, h, gid, gtok = _gateway_flow("sess@example.com")
-    # free plan cap = 1 active session: second create must be rejected
     r1 = client.post("/api/v1/connections", json={"gateway_id": gid}, headers=h)
     assert r1.status_code == 200, r1.text
     sid = r1.json()["id"]
+    # same gateway again -> resume the active session (no duplicate, no 403)
     r_cap = client.post("/api/v1/connections", json={"gateway_id": gid}, headers=h)
-    assert r_cap.status_code == 403
+    assert r_cap.status_code == 200, r_cap.text
+    assert r_cap.json()["id"] == sid
+    # the cap still bites: a parallel session on a DIFFERENT gateway -> 403
+    rg = client.post("/api/v1/gateways/register", json={
+        "device_type": "esp32", "public_key": "k-cap2-valid-key-0123456789"})
+    gid2, gcode = rg.json()["gateway_id"], rg.json()["pairing_code"]
+    c2 = client.post(f"/api/v1/me/gateways/{gid2}/claim",
+                     json={"pairing_code": gcode}, headers=h)
+    assert c2.status_code == 200, c2.text
+    client.post("/api/v1/gateways/heartbeat", json={"firmware_version": "1.0"},
+                headers={"Authorization": f"Bearer {c2.json()['gateway_token']}"})
+    r_par = client.post("/api/v1/connections", json={"gateway_id": gid2}, headers=h)
+    assert r_par.status_code == 403
     g = client.get(f"/api/v1/connections/{sid}", headers=h)
     assert g.json()["status"] == "authorized"
     # authorized -> connecting -> connected -> disconnecting -> disconnected

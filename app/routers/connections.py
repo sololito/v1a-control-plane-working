@@ -55,6 +55,51 @@ async def create_connection(body: schemas.ConnectionCreate, request: Request,
         raise HTTPException(status_code=404, detail="gateway not found")
     can_access_gateway(db, user.id, gw)
     check_subscription_entitlement(db, user.id)
+    # Cap handling with resume. First sweep this user's sessions past their
+    # validity window (they must not keep eating the cap), then: if the cap
+    # allows a new session, create one as usual — but if it does not and the
+    # user already holds an active session ON THIS GATEWAY, attach to it
+    # instead of failing: tapping "open tunnel session" again must land you
+    # in the session you already have (the free plan allows just one, so a
+    # plain 403 here would lock users out of their own session). This block
+    # runs before the online check so an offline gateway can never trap an
+    # active session where it cannot be reached or closed.
+    ent = _entitlements(db, user.id)
+    cap = int(ent.get("max_sessions", settings.session_max_active))
+    now = datetime.utcnow()
+    fresh = []
+    for row in (db.query(models.ConnectionSession)
+                .filter(models.ConnectionSession.user_id == user.id,
+                        models.ConnectionSession.status.in_(ACTIVE_STATUSES))
+                .order_by(models.ConnectionSession.requested_at.desc()).all()):
+        if row.expires_at and row.expires_at < now:
+            row.status = "expired"
+            row.ended_at = now
+            db.add(models.SessionEvent(session_id=row.id, event="expired",
+                                       detail=json.dumps({"reason": "stale_on_create"})))
+        else:
+            fresh.append(row)
+    if len(fresh) >= cap:
+        same_gw = next((r for r in fresh if str(r.gateway_id) == str(gw.id)), None)
+        if same_gw is None:
+            db.commit()  # persist the sweep even though the create is refused
+            raise HTTPException(status_code=403, detail=f"session limit reached ({cap})")
+        token = create_session_token(str(same_gw.id))
+        same_gw.session_token_hash = sha256_hex(token)
+        db.add(models.SessionEvent(session_id=same_gw.id, event="resumed",
+                                   detail=json.dumps({"path": same_gw.connection_path})))
+        db.add(models.AuditLog(actor_type="user", actor_id=str(user.id),
+                               action="connection.resume",
+                               resource_type="connection_session",
+                               resource_id=str(same_gw.id), ip=ip))
+        db.commit()
+        db.refresh(same_gw)
+        creds = get_tunnel_provider().request_credentials(str(same_gw.id))
+        return {"id": str(same_gw.id), "status": same_gw.status,
+                "connection_path": same_gw.connection_path,
+                "gateway_id": str(same_gw.gateway_id),
+                "expires_at": same_gw.expires_at,
+                "session_token": token, "tunnel": creds}
     if not _online(gw):
         db.add(models.AuditLog(actor_type="user", actor_id=str(user.id),
                                action="connection.rejected_offline",
@@ -63,13 +108,6 @@ async def create_connection(body: schemas.ConnectionCreate, request: Request,
         raise HTTPException(status_code=409, detail="gateway offline")
     if body.connection_path not in ("direct", "relay", "unknown", "failed"):
         raise HTTPException(status_code=422, detail="bad connection_path")
-    ent = _entitlements(db, user.id)
-    cap = int(ent.get("max_sessions", settings.session_max_active))
-    active = db.query(models.ConnectionSession).filter(
-        models.ConnectionSession.user_id == user.id,
-        models.ConnectionSession.status.in_(ACTIVE_STATUSES)).count()
-    if active >= cap:
-        raise HTTPException(status_code=403, detail=f"session limit reached ({cap})")
     sess = models.ConnectionSession(
         user_id=user.id, device_id=dev.id, gateway_id=gw.id, status="authorized",
         connection_path=body.connection_path,
