@@ -92,6 +92,46 @@ def my_gateways(user_dev=Depends(get_current_user_device), db: Session = Depends
              "status": g.status, "last_seen": g.last_seen, "created_at": g.created_at} for g in gws]
 
 
+@router.get("/me/pending-pairings")
+def pending_pairings(request: Request, user_dev=Depends(get_current_user_device),
+                     db: Session = Depends(get_db)):
+    """Claim autofill candidates: unclaimed gateways + a usable pairing code.
+
+    Codes are stored hashed only, so each fetch MINTS a fresh one (previous
+    codes stop working). The plaintext goes to the logged-in app so its claim
+    box can be prefilled — the user just taps Claim. Gated by PAIRING_PREFILL
+    (off by default: any authenticated user could otherwise claim any pending
+    gateway) and rate-limited per user+IP.
+    """
+    if not settings.pairing_prefill:
+        raise HTTPException(status_code=404, detail="not available")
+    user, _ = user_dev
+    check_rate(f"gw_pending:{client_ip(request)}", str(user.id),
+               settings.auth_rate_per_minute)
+    now = datetime.utcnow()
+    # owner IS NULL (not status) marks a candidate: heartbeat flips an
+    # unclaimed gateway to "online".
+    rows = (db.query(models.Gateway)
+            .filter(models.Gateway.owner_user_id == None,  # noqa: E712
+                    models.Gateway.status != "revoked")
+            .order_by(models.Gateway.last_seen.desc().nullslast(),
+                      models.Gateway.created_at.desc())
+            .limit(5).all())
+    out = []
+    for gw in rows:
+        code = new_pairing_code()
+        gw.pairing_code_hash = sha256_hex(code)
+        gw.pairing_expires_at = now + timedelta(minutes=settings.pairing_code_ttl_minutes)
+        gw.pairing_attempts = 0
+        out.append({"gateway_id": str(gw.id), "device_type": gw.device_type,
+                    "firmware_version": gw.firmware_version, "pairing_code": code,
+                    "expires_at": gw.pairing_expires_at})
+    _audit(db, "user", str(user.id), "gateway.pending_pairings",
+           detail=json.dumps({"count": len(out)}), ip=client_ip(request))
+    db.commit()
+    return out
+
+
 @router.post("/me/gateways/{gateway_id}/claim")
 def claim_gateway(gateway_id: str, body: schemas.GatewayClaimRequest, request: Request,
                   user_dev=Depends(get_current_user_device), db: Session = Depends(get_db)):

@@ -19,6 +19,12 @@ class Settings(BaseSettings):
     rate_limit_per_minute: int = 60
     pairing_code_ttl_minutes: int = 15
     heartbeat_offline_after_seconds: int = 120
+    # --- Claim autofill (app: prefill gateway id + pairing code after login) ---
+    # Exposes freshly minted pairing codes for UNCLAIMED gateways to any
+    # authenticated user (GET /me/pending-pairings). That trades claim-jacking
+    # resistance for UX: with it on, any registered account can claim any
+    # pending gateway. Off by default — enable only on trusted deployments.
+    pairing_prefill: bool = False
     # --- Background maintenance (lifespan-started; off in tests) ---
     maintenance_enabled: bool = True
     maintenance_interval_seconds: int = 30

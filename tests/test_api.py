@@ -1,6 +1,7 @@
 """Integration tests vs SQLite (same models as Postgres). Covers Guide §19 core."""
 import os
 os.environ["DATABASE_URL"] = "sqlite:///./test_odivora.db"
+os.environ["PAIRING_PREFILL"] = "true"  # claim autofill endpoint is exercised below
 
 import json
 from fastapi.testclient import TestClient
@@ -92,6 +93,29 @@ def test_gateway_pairing_auth_and_revoke():
     # owner can revoke
     rv = client.post(f"/api/v1/me/gateways/{gid}/revoke", headers=h)
     assert rv.status_code == 200
+
+
+def test_pending_pairings_prefill():
+    # Claim autofill: candidates come back with a FRESH code (register-time
+    # code is rotated by the fetch); claiming consumes the candidate.
+    t = reg_login("prefill@example.com")
+    h = {"Authorization": f"Bearer {t['access_token']}"}
+    r = client.post("/api/v1/gateways/register", json={
+        "device_type": "esp32", "public_key": "k-prefill-valid-key-0123456789"})
+    assert r.status_code == 200, r.text
+    gid = r.json()["gateway_id"]
+    pf = client.get("/api/v1/me/pending-pairings", headers=h)
+    assert pf.status_code == 200, pf.text
+    cand = {c["gateway_id"]: c for c in pf.json()}
+    assert gid in cand
+    old = client.post(f"/api/v1/me/gateways/{gid}/claim",
+                      json={"pairing_code": r.json()["pairing_code"]}, headers=h)
+    assert old.status_code == 403  # register-time code no longer valid
+    c = client.post(f"/api/v1/me/gateways/{gid}/claim",
+                    json={"pairing_code": cand[gid]["pairing_code"]}, headers=h)
+    assert c.status_code == 200, c.text
+    pf2 = client.get("/api/v1/me/pending-pairings", headers=h)
+    assert gid not in {x["gateway_id"] for x in pf2.json()}
 
 
 def test_unauthorized_gateway_access():
