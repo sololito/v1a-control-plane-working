@@ -1,0 +1,461 @@
+# ODIVORA Home Connectivity — Complete V1B Integration and Remote Connectivity Test
+
+You are the lead networking engineer and backend developer for the ODIVORA Home Connectivity project.
+
+Your task is to complete our V1B data-plane integration, connecting the existing ODIVORA application to a Linux home gateway behind Starlink CGNAT, with a remote phone connecting over mobile data.
+
+We have already demonstrated that our application can generate a WireGuard configuration and establish a VPN when both devices are on the same network. The ESP32 has also successfully registered and completed pairing with the backend.
+
+Now we must prove that a remote phone can use the home's internet connection **without port forwarding, a static home public IP, or changes to the TP-Link/Tenda or Starlink router**.
+
+## 1. Critical operating rule: the owner controls the VPS
+
+The existing VPS hosts production ODIVORA services. I will personally run all critical commands on that VPS.
+
+**You MUST NOT independently execute commands that modify the VPS, even if you have terminal, SSH, browser or remote execution access.**
+
+This prohibition includes:
+
+- Installing or removing VPS packages.
+- Creating, editing, overwriting or deleting files under `/etc/wireguard`.
+- Starting, stopping, restarting or enabling system services.
+- Changing UFW, iptables, nftables or other firewall rules.
+- Changing routing tables, IP rules, forwarding or network interfaces.
+- Modifying DNS records.
+- Changing the VPS provider's firewall/security groups.
+- Restarting, recreating, deploying or modifying existing Docker containers.
+- Modifying the production website, Nginx or database.
+- Running commands that could interrupt SSH access or change the VPS's default route.
+
+You may inspect and modify the **project source code in the designated development repository**, run local tests and prepare scripts and configuration templates.
+
+For every required VPS or home-gateway operation:
+
+1. Explain what the operation will do.
+2. Present the exact commands for me to execute.
+3. Explain which machine they run on: VPS, home Ubuntu gateway or remote phone.
+4. Identify any effect on existing services or network connectivity.
+5. Provide a rollback command where appropriate.
+6. Stop and wait for me to run the commands and report their output.
+7. Review the output before giving me the next dependent command.
+
+Do not bundle the entire deployment into one script requiring unrestricted root access.
+
+Never ask me to send passwords, SSH private keys, WireGuard private keys, JWTs, refresh tokens or other secrets into the conversation or source repository.
+
+## 2. Current infrastructure — preserve it
+
+### Existing VPS
+
+- Operating system: Ubuntu 26.04 LTS.
+- Public IPv4: `204.13.234.26`.
+- External network interface: `eth0`.
+- DNS: `relay.odivora.com` resolves to `204.13.234.26`.
+- Existing website: `odivora.com`.
+- Existing website/application directory: `/opt/odivora`.
+- Nginx currently uses TCP ports 80 and 443.
+- IPv4 forwarding is enabled.
+- UFW is active, with the current rules allowing SSH, TCP 80/443, UDP 51820 and UDP 51821.
+- The VPS has Docker containers for `affiliate-system`, `memberzone-db`, `nginx`, and an MQTT container known to be unused and restarting.
+
+The existing `affiliate-system` consumes substantial RAM, and the VPS has experienced high memory and swap usage. Keep testing low-volume. Do not run load tests or restart existing services during initial integration.
+
+**Treat `/opt/odivora` and the current production deployment as protected.** Do not repurpose that directory or redeploy the website. Work in the actual Home Connectivity source repository. If the repository is not identifiable, ask me to identify or provide it before making changes.
+
+Do not assume that `api.odivora.com` is already correctly reverse-proxied simply because a DNS record exists. Inspect the application's current API configuration and preserve the working API URL until a change has been tested.
+
+### WireGuard already installed on the VPS
+
+The following key files exist:
+
+- `/etc/wireguard/odivora-server.key`
+- `/etc/wireguard/odivora-server.pub`
+- `/etc/wireguard/wg-home-server.key`
+- `/etc/wireguard/wg-home-server.pub`
+
+The two private keys must stay on the VPS. Do not print, transmit or replace them without an explicit, justified rotation procedure.
+
+The existing public keys are:
+
+**Phone-facing VPS interface:**
+`QRR0eQjBF56WMwMFyqEwMO8UxCKNQ//DJBGSQLAKKgE=`
+
+**Home-facing VPS interface:**
+`g0wC+UEHc+DXbbTU9D/tPdxPJyI5m1Mai0eX4M64SCA=`
+
+The existing configurations have been created:
+
+`/etc/wireguard/wg-phone.conf`
+
+- Interface address: `10.200.1.1/24`
+- UDP listening port: `51820`
+
+`/etc/wireguard/wg-home.conf`
+
+- Interface address: `10.200.2.1/24`
+- UDP listening port: `51821`
+- `Table = off`
+
+Both interfaces have successfully been brought up manually and are listening on their respective UDP ports.
+
+There are currently no confirmed phone/home peers or successful remote handshakes.
+
+Do not assume that WireGuard is configured to start at boot. Inspect and document the existing state before recommending persistence changes.
+
+The VPS provider's external firewall has not yet been confirmed. Before testing from outside, ask me to verify that inbound UDP 51820 and UDP 51821 are allowed in the provider's control panel.
+
+## 3. Target test architecture
+
+We will use the existing VPS temporarily as a routed WireGuard hub, with two WireGuard interfaces.
+
+```text
+                     ODIVORA VPS
+                  Public IP 204.13.234.26
+                            |
+            +---------------+---------------+
+            |                               |
+       wg-phone                         wg-home
+       UDP 51820                        UDP 51821
+       10.200.1.1                      10.200.2.1
+            |                               |
+            |                               |
+        Remote phone                   Home Ubuntu
+        10.200.1.2                     10.200.2.2
+        Mobile data                    Starlink LAN
+                                            |
+                                      Home router
+                                            |
+                                         Starlink
+                                            |
+                                         Internet
+```
+
+The intended end-to-end IPv4 traffic path is:
+
+```text
+Remote phone
+    |
+    | WireGuard tunnel A
+    v
+VPS: wg-phone
+    |
+    | Linux forwarding and source-based policy routing
+    v
+VPS: wg-home
+    |
+    | WireGuard tunnel B
+    v
+Home Ubuntu gateway
+    |
+    | IP forwarding and NAT
+    v
+Home router
+    |
+    v
+Starlink
+    |
+    v
+Public Internet
+```
+
+Return traffic must travel back through the home gateway and VPS to the phone.
+
+The home gateway must initiate an outbound WireGuard connection to `relay.odivora.com:51821`. The phone connects to `relay.odivora.com:51820`.
+
+Use `PersistentKeepalive = 25` where appropriate for the NATed peers.
+
+The home router should need no port forwarding, static IP, DDNS, or VPN configuration.
+
+### Important encryption limitation
+
+For this initial test, the two WireGuard tunnels terminate independently on the VPS. The VPS therefore decrypts packets from one tunnel before forwarding and encrypting them into the other.
+
+This is a temporary laboratory hub design, **not end-to-end encryption between the phone and home gateway**. Do not describe it as opaque relaying or as production-ready end-to-end encryption.
+
+Document this limitation clearly. A future direct peer-to-peer path or encrypted-packet relay is a separate architectural phase.
+
+## 4. Phase One — audit the repository before changing code
+
+Inspect the existing source code and identify the actual implementations of:
+
+- User registration/login.
+- User/device identity and revocation.
+- Gateway registration.
+- Gateway pairing and claiming.
+- Gateway authentication.
+- Gateway heartbeat.
+- Gateway online/offline detection.
+- Connection/session creation.
+- Connection authorization.
+- WireGuard configuration generation.
+- Gateway peer synchronization.
+- Session verification and handshake reporting.
+- Connection termination and peer revocation.
+
+Our existing control-plane tests have passed, and real ESP32 registration/pairing worked.
+
+Do not rewrite working functionality unnecessarily.
+
+Run the existing automated tests and report their baseline status before making changes.
+
+Inspect the API contracts, request fields, response fields and authentication requirements from the actual implementation. Do not invent endpoints or assume undocumented request structures.
+
+Produce a short architecture report and change plan. Continue with implementation once the repository and contracts are understood.
+
+## 5. Phase Two — implement the WireGuard data-plane integration
+
+Preserve the current two-interface VPS design unless you identify a concrete networking problem. If a redesign is necessary, explain the problem and proposed solution before requesting changes to the VPS.
+
+The implementation must support:
+
+- VPS phone-facing and home-facing peers.
+- Unique tunnel addresses.
+- Peer public-key registration.
+- Authorized session provisioning.
+- Peer synchronization.
+- Peer removal on disconnect, expiry or revocation.
+- Tunnel status and handshake timestamps.
+- Useful, non-sensitive connection/error logs.
+
+Never store private keys in Git, ordinary database fields, logs or API responses.
+
+The phone and home gateway must keep their private keys locally wherever the current application design permits. Audit the existing key lifecycle and document any existing deviation before changing it.
+
+Do not place fixed private keys or access tokens in source code, configuration examples or generated logs.
+
+## 6. Phase Three — implement correct routing on the VPS
+
+The VPS's own internet access, SSH, website and API must continue using its normal default route through `eth0`.
+
+**Do not change the VPS main default route to `wg-home`.**
+
+The routing implementation must direct only authorized phone-originated internet traffic through the home-facing WireGuard interface.
+
+Use an appropriate source-based policy-routing table or another explicitly justified, safe equivalent. Preserve correct routes back to the phone tunnel subnet.
+
+Check for subnet overlap before configuring routes.
+
+The implementation must handle the existing UFW default policy, which denies routed traffic. Provide narrowly scoped forwarding rules between the WireGuard interfaces. Do not disable UFW or flush firewall tables to make the test work.
+
+Avoid broad VPS NAT rules that would make traffic exit through the VPS public IP. The final internet egress must be the home's Starlink connection.
+
+Before asking me to apply routes or firewall changes:
+
+- Explain the proposed rules.
+- Explain how they preserve the existing VPS route.
+- Show the intended traffic path.
+- Provide a rollback.
+- Wait for me to execute and report the result.
+
+## 7. Phase Four — configure the home Linux gateway
+
+The home Ubuntu machine is a separate machine behind Starlink.
+
+Detect its real Ethernet interface and routing configuration dynamically. Do not assume its interface is named `eth0`.
+
+The home gateway must:
+
+1. Generate its own WireGuard identity locally if one does not already exist.
+2. Keep its private key on the home machine.
+3. Connect outbound to `relay.odivora.com:51821`.
+4. Use the correct home-facing VPS public key.
+5. Receive traffic destined for the phone's tunnel subnet.
+6. Forward authorized phone traffic to the home LAN/internet.
+7. Apply narrowly scoped NAT/masquerading toward the actual home-router-facing interface.
+8. Route reply traffic back through WireGuard.
+9. Retain its ordinary default route through the home router.
+10. Recover after network interruptions and reboot.
+
+Do not require changes to the Starlink, TP-Link or Tenda router.
+
+Provide the exact setup commands and configuration files for me to execute on the home Ubuntu machine, and wait for their outputs before proceeding.
+
+## 8. Phase Five — connect the phone through ODIVORA
+
+The current demo can generate a WireGuard configuration such as `odivora-748h.conf`. Preserve its existing working flow and integrate the changes into the actual configuration generator.
+
+Inspect the existing phone configuration process before changing it.
+
+For the temporary full-tunnel IPv4 test, the generated configuration must use:
+
+- Endpoint: `relay.odivora.com:51820`
+- The correct phone-facing VPS public key.
+- The phone's unique tunnel address.
+- Full IPv4 tunnel routing using `AllowedIPs = 0.0.0.0/0`.
+- Appropriate keepalive behavior.
+- A DNS configuration consistent with the full-tunnel test.
+
+Do not enable IPv6 full-tunnel claims unless IPv6 routing and egress are actually configured and tested. Do not allow the phone to silently leak IPv6 traffic while claiming all internet traffic uses the home gateway; disable IPv6 traffic in the test profile or implement and verify IPv6 routing appropriately.
+
+The phone's private key must not be logged or exposed to other users.
+
+The generated configuration must still depend on the existing server-side authorization flow. Do not bypass session authorization by creating unrestricted permanent phone peers.
+
+## 9. Phase Six — integrate the existing control plane
+
+After the basic network configuration has been validated, connect it to the existing ODIVORA control plane.
+
+Use the existing APIs and session contracts discovered during the audit.
+
+The desired lifecycle is:
+
+```text
+Phone authenticates
+        |
+        v
+User/device authorization
+        |
+        v
+Request own gateway connection
+        |
+        v
+Check gateway, ownership/grant and entitlements
+        |
+        v
+Create authorized session
+        |
+        v
+Provision the authorized WireGuard peer
+        |
+        v
+Home gateway syncs its authorized peer configuration
+        |
+        v
+WireGuard handshake
+        |
+        v
+Verify actual connectivity
+```
+
+The system must not accept a user-supplied `gateway_id` without checking authorization server-side.
+
+When a session is ended, expired or revoked, its phone peer must be removed or disabled promptly.
+
+When a device or gateway is revoked, a stale configuration must not allow continued access indefinitely.
+
+The implementation should distinguish clearly between:
+
+- `AUTHORIZED`: the control plane approved the connection.
+- `TUNNEL_ESTABLISHED`: the WireGuard peer has a recent valid handshake.
+- `INTERNET_VERIFIED`: real traffic has successfully exited through the home connection.
+
+Do not report a session as successfully connected to the internet merely because an API returned HTTP 200.
+
+## 10. Phase Seven — session routing and accountability
+
+Record sufficient metadata to support security troubleshooting and session attribution:
+
+- User/account ID.
+- Device ID.
+- Gateway ID.
+- Session ID.
+- Start/end times.
+- Assigned tunnel address.
+- Selected route.
+- Bytes sent/received where available.
+- Disconnect reason.
+- Gateway/peer health.
+- Relevant authorization and revocation events.
+
+Do not begin collecting browsing contents or full browsing history.
+
+Keep logs structured and useful without exposing private keys, tokens, or unnecessary personal information.
+
+The relay test is low-volume. Do not run stress tests against the existing VPS.
+
+## 11. Phase Eight — manual end-to-end acceptance test
+
+The feature is not proven by successful API requests or a tunnel between devices on the same LAN.
+
+We must complete this real-world test:
+
+**At home:**
+- Starlink router.
+- Home Ubuntu gateway connected by Ethernet.
+- Gateway connected to the VPS.
+- No port forwarding on the home router.
+
+**Away from home:**
+- Phone Wi-Fi turned off.
+- Phone on Safaricom, Airtel or another genuinely separate mobile network.
+- Phone connects through the ODIVORA-generated WireGuard profile.
+
+Test the following:
+
+1. The phone is authorized by ODIVORA.
+2. Both WireGuard tunnels establish valid handshakes.
+3. The VPS forwards phone-originated traffic toward the home gateway.
+4. The home gateway forwards traffic through Starlink.
+5. The phone can resolve DNS and load an HTTPS webpage.
+6. An IPv4 public-IP check on the phone shows the same public egress IP as a device using the home's Starlink connection, subject to IP-check methodology.
+7. Latency, throughput and packet loss can be measured without saturating the existing VPS.
+8. The VPS's default route, SSH access, website and API remain functional.
+9. Disconnecting a session removes its peer and prevents further tunnel traffic for that session.
+10. Revoking the device or gateway prevents new unauthorized sessions and peer re-establishment.
+
+Document the actual measurements. Do not invent or estimate the results.
+
+## 12. Phase Nine — reliability and boot persistence
+
+Do not configure automatic boot persistence until a manual test succeeds.
+
+Once validated, prepare controlled steps for:
+
+- Bringing both WireGuard interfaces up at boot.
+- Ensuring peer configuration is restored correctly.
+- Starting the home gateway service.
+- Recovering from loss of internet connectivity.
+- Cleaning up expired sessions.
+- Verifying that firewall rules persist.
+- Ensuring no boot-time route modification interrupts VPS SSH or production services.
+
+I will manually apply these changes.
+
+Provide tested rollback commands for each configuration change.
+
+## 13. Required implementation outputs
+
+Complete the work in the actual Home Connectivity repository and supply:
+
+1. A summary of the existing architecture and verified baseline.
+2. Any necessary backend/API updates.
+3. Changes to the gateway agent and peer synchronization logic.
+4. Updates to WireGuard configuration generation.
+5. Required database migrations, if any.
+6. Automated tests for authorization, peer provisioning, revocation and session state.
+7. A documented VPS configuration procedure.
+8. A documented home Ubuntu gateway procedure.
+9. A documented phone setup procedure.
+10. A safe routing/firewall plan and rollback.
+11. A manual end-to-end validation checklist.
+12. A performance-measurement procedure.
+13. An explanation of the temporary hub's encryption limitations.
+14. A list of unresolved risks and next steps toward a production direct/relay architecture.
+
+Do not claim an end-to-end test has passed unless the actual network test was performed and its results recorded.
+
+## 14. Working method
+
+Proceed in small, verified phases:
+
+**Phase A:** Inspect repository, current APIs and tests. Report findings.
+
+**Phase B:** Implement and test code changes locally.
+
+**Phase C:** Give me the exact VPS commands, one controlled batch at a time. Wait for me to run them and return their output.
+
+**Phase D:** Guide me through the home Ubuntu gateway setup. Again, wait for outputs.
+
+**Phase E:** Connect the phone, validate the real route and measure performance.
+
+**Phase F:** Integrate and verify disconnect/revocation behaviour.
+
+Never assume that a command succeeded because it was provided. Verify its output.
+
+If a critical command fails, diagnose the failure before recommending another change.
+
+### Guiding principle
+
+**The VPS must remain safe. ODIVORA's website/API must remain online. The phone's data traffic must exit through Starlink, not the VPS. The home gateway must work behind CGNAT without port forwarding. The user must remain in control of every privileged production-server change.**
+
+Our goal is to turn the existing, working V1A identity/pairing system into a real V1B remote-connectivity test, without rebuilding functionality that already works.

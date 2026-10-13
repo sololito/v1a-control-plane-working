@@ -1,0 +1,402 @@
+# ODIVORA V1B — PROGRESS TRACKER & DEPLOYMENT RUNBOOK
+# Single-file tracker. Read this to resume without re-reading the whole repo.
+# Last updated: 2026-10-13
+#
+# OPERATING RULE (non-negotiable): the owner runs every privileged command on
+# the VPS and the home gateway. The assistant only inspects the repo, writes
+# code/tests/templates, and proposes exact commands. Never paste secrets
+# (SECRET_KEY, tokens, WireGuard private keys) into chat or the repo.
+
+================================================================================
+0. HOW TO USE THIS FILE
+================================================================================
+- Each step has: MACHINE, EFFECT, COMMANDS, EXPECTED, ROLLBACK.
+- Do them in order. After each batch, paste the output back; the next batch
+  is issued only after the previous output is reviewed.
+- [ ] = not done, [~] = in progress, [x] = done + output recorded.
+
+================================================================================
+1. PROGRESS TRACKER
+================================================================================
+[x] Phase A   Audit repo + baseline tests ............ 201 passed (31m, slow disk)
+[x] Preflight VPS read-only probe (exposure + py3.14)  OUTPUT: BATCH_PREFLIGHT_EXECUTED_COMMANDS.txt
+[~] Blocker1  API exposure w/ Dockerized nginx ........ OPEN (no host nginx; pick (b) or (c) at Batch D)
+[~] Blocker2  Python 3.14 deps ........................ likely OK; verify in Batch A Part 4
+[ ] Blocker3  Provider firewall UDP 20000-20999 ....... owner must confirm in control panel
+[~] Batch A   Place code at /opt/odivora-v1b ......... tarball ready; run PART 2-4
+[ ] Batch B   venv + .env + SQLite schema
+[ ] Batch C   systemd units odivora-api / odivora-relay
+[ ] Batch D   Expose API + open relay UDP ports (UFW + provider)
+[ ] Batch E   Verify control plane (e2e smoke on VPS)
+[ ] Phase D   Home Ubuntu gateway: wireguard, provision, daemon
+[ ] Phase E   Phone connect + real route (egress = Starlink IP)
+[ ] Phase F   Disconnect/revoke behaviour + persistence
+
+BATCH FILES
+  BATCH_PREFLIGHT_EXECUTED_COMMANDS.txt   pre-flight output (owner)
+  BATCH_A_EXECUTED_COMMANDS.txt           current batch: place code + build venv
+
+Design in use: **design 1 — VPS hosts the API and the UDP pair-forwarder relay.**
+The routed two-interface hub in VPS_RELAY.txt §3 (design 2) is intentionally
+NOT used: it is unnecessary and would need VPS routing/default-route changes.
+Design 1 keeps WireGuard end-to-end encrypted (the relay never decrypts) and
+needs NO VPS routing, NAT, FORWARD or default-route changes.
+
+================================================================================
+2. ARCHITECTURE (design 1)
+================================================================================
+        Remote phone ── HTTPS (control) ──┐
+                       UDP relay pair ────┤
+                                          ▼
+                            ODIVORA VPS  204.13.234.26
+                            ├─ odivora-api   127.0.0.1:8000   (control plane)
+                            └─ odivora-relay 127.0.0.1:9090 (control, loopback)
+                                             UDP 20000-20999 (pair forwarding)
+                                             UDP 3478 (rendezvous, optional)
+                                          ▲
+                       outbound HTTPS + UDP from home
+                                          │
+        Home Ubuntu gateway (behind Starlink CGNAT) ── wg0 + NAT ── Starlink ── Internet
+
+WireGuard path: phone <-> gateway (both peers), endpoints are the relay's
+per-session UDP ports. The relay copies ciphertext only. No port forwarding at
+home; no static home IP; no router changes.
+
+================================================================================
+3. VERIFIED VPS FACTS (from EXECUTED COMMANDS.txt, 13 Oct 2026)
+================================================================================
+- OS Ubuntu 26.04 LTS, kernel 7.0.0-29, Python 3.14.4, RAM 5.3Gi (tight).
+- Public IP 204.13.234.26, external iface eth0.
+- /opt/odivora on the VPS is the PRODUCTION website repo (git commit
+  "update campaign"), NOT this V1B repo. Never deploy over it.
+- Docker containers: affiliate-system (8080? -> 10000/tcp), nginx (80/443),
+  memberzone-db (5432), mqtt-broker (Restarting — INTENTIONAL, do not touch).
+- nginx IS A DOCKER CONTAINER (nginx:1.27-alpine) owning 80/443. There is no
+  host nginx. => the host-/etc/nginx plan in PREPARE_CODE_FOR_VPS.txt Batch D
+  is WRONG and must be replaced (see Batch 2 / Batch D).
+- UFW active: default deny incoming, allow outgoing, DENY routed.
+  Rules: 22/tcp, 80/tcp, 443/tcp, 51820/udp, 51821/udp.
+- UDP 51820 and 51821 are listening (leftover wg-phone / wg-home interfaces
+  from the old hub plan). Unused by design 1. Do not touch for now.
+- TCP 8000 and 9090: free. UDP 20000-20999: free.
+- /etc/wireguard has wg-phone.conf, wg-home.conf (Table=off), odivora-server.key,
+  wg-home-server.key (+ .pub). root-only. NOT needed by design 1.
+
+================================================================================
+4. OPEN BLOCKERS (resolve via Batch 2 before any deploy)
+================================================================================
+B1. API exposure. nginx is Dockerized (production conf is
+    /opt/odivora/nginx.conf -> /etc/nginx/nginx.conf, certs /srv/ssl).
+    No host nginx exists. Choose ONE at Batch D:
+    (a) Add a NEW server block to the existing Docker nginx (edits production
+        nginx.conf) — owner approval; avoid if possible.
+    (b) Install a SEPARATE host nginx (apt) bound only to a dedicated port
+        (e.g. 8443), proxying 127.0.0.1:8000; cert via Let's Encrypt DNS-01.
+        Fully isolated from Docker.  RECOMMENDED.
+    (c) Bind odivora-api to 0.0.0.0:8443 and terminate TLS in uvicorn with a
+        cert for relay.odivora.com. Simplest; opens one TCP port.
+    NOTE: odivora-api .service binds 127.0.0.1:8000 by default; change only for (c).
+
+B2. Python 3.14 dependency install. RESOLVED (cause was testing the wrong file):
+    the pre-flight ran `pip install -r /opt/odivora/requirements.txt`, which on
+    the VPS is the PRODUCTION Flask/torch/kokoro-onnx set (kokoro-onnx caps at
+    Python <3.13). V1B deps are now in requirements-v1b.txt (small, lower-bound
+    pins). Batch A Part 4 installs it under 3.14 and reports PIP result.
+
+B3. Provider firewall. Owner must confirm inbound UDP 20000-20999 (and 3478 if
+    used) is allowed in the VPS provider control panel. Cannot be done by shell.
+
+================================================================================
+5. LOCAL BASELINE (DEV BOX — this repo, not the VPS)
+================================================================================
+- Repo remote: github.com/sololito/v1a-control-plane-working.git, branch main.
+- Data-plane tests pass (test_relay.py 24 OK; test_stage3/4/5 relevant suites).
+- Full suite: `pytest -q` -> **201 passed, 2479 warnings in 1873.95s (31m)**.
+  This box's disk makes sqlite DDL take ~8-12s each; it is slow, not hung.
+- Uncommitted Phase-B changes present (keep; not yet committed):
+  app/gateway/dataplane.py (per-peer keepalive + WAN detect),
+  firmware/linux_gateway/gateway_agent.py (keepalive per peer),
+  tests/test_stage4_gateway.py (+2 tests), mobile UI, scripts/e2e_smoke_test.py.
+- e2e_smoke_test.py already fixed to use wg-public-key (generate-keys is 410).
+
+================================================================================
+6. BATCH 2 — VPS READ-ONLY PRE-FLIGHT   [OWNER RUNS]   <-- START HERE
+================================================================================
+MACHINE: VPS.  EFFECT: none (read-only). Creates then deletes a /tmp venv only.
+Resolves blockers B1 and B2. Paste the full output back.
+
+```bash
+echo "===== A. Host nginx present? ====="
+command -v nginx >/dev/null && nginx -v 2>&1 || echo "(no host nginx; nginx is a Docker container)"
+ls -l /etc/nginx/sites-enabled/ 2>/dev/null || echo "(no host nginx sites)"
+
+echo "===== B. Docker nginx: config + reachability ====="
+sudo docker inspect nginx --format 'MOUNTS: {{range .Mounts}}{{.Source}}->{{.Destination}} {{end}}'
+sudo docker inspect nginx --format 'NET: {{range $k,$v := .NetworkSettings.Networks}}{{$k}}={{$v.IPAddress}} {{end}}'
+sudo docker inspect affiliate-system --format 'affiliate IP: {{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}'
+ip -4 addr show docker0 2>/dev/null | grep inet || true
+sudo docker exec nginx grep -rE 'server_name|listen|proxy_pass' /etc/nginx/conf.d /etc/nginx/nginx.conf 2>/dev/null | head -30
+
+echo "===== C. Candidate API ports free? ====="
+sudo ss -ltnp | grep -E ':(8000|8443|9443|9090)\b' || echo "(8000/8443/9443/9090 all free)"
+
+echo "===== D. Python 3.14 venv + dependency feasibility (temp dir only) ====="
+python3 --version
+python3 -m venv /tmp/v1b-check-venv \
+ && /tmp/v1b-check-venv/bin/pip install -q --upgrade pip \
+ && /tmp/v1b-check-venv/bin/pip install -q -r /opt/odivora/requirements.txt 2>&1 | tail -25 \
+ && echo "PIP_OK" || echo "PIP_FAILED"
+rm -rf /tmp/v1b-check-venv
+
+echo "===== E. DNS / existing TLS ====="
+getent hosts relay.odivora.com api.odivora.com odivora.com || true
+```
+
+EXPECTED: A shows whether host nginx exists; B shows the Docker nginx conf
+mount path and network IP; C confirms ports free; D prints PIP_OK/PIP_FAILED;
+E shows which names resolve.
+ROLLBACK: none (nothing changed).
+
+================================================================================
+7. BATCH A — PLACE CODE AT /opt/odivora-v1b   [OWNER RUNS]
+================================================================================
+MACHINE: DEV BOX (copy) + VPS (receive). EFFECT: adds a new dir; production
+untouched. No secrets move (excludes .env, DBs, venv, .git, .toolchain).
+See BATCH_A_EXECUTED_COMMANDS.txt for the current, verified sizes/SHA.
+
+```bash
+# --- on the DEV BOX: tarball already prepared by the assistant ---
+ls -lh /tmp/opencode/odivora-v1b.tgz    # ~313 KB
+scp /tmp/opencode/odivora-v1b.tgz odivoraadmin@204.13.234.26:/tmp/
+
+# --- on the VPS ---
+sudo rm -rf /opt/odivora-v1b && sudo mkdir -p /opt/odivora-v1b
+sudo tar xzf /tmp/odivora-v1b.tgz -C /opt/odivora-v1b
+sudo chown -R root:root /opt/odivora-v1b
+ls -la /opt/odivora-v1b/deploy/vps/
+```
+ROLLBACK: sudo rm -rf /opt/odivora-v1b /tmp/odivora-v1b.tgz
+
+================================================================================
+8. BATCH B — VENV + .ENV + SQLITE SCHEMA   [OWNER RUNS]
+================================================================================
+MACHINE: VPS. EFFECT: new venv + new SQLite DB inside the isolated dir only.
+(If Batch 2 D reported PIP_FAILED, adjust versions here first.)
+
+```bash
+cd /opt/odivora-v1b
+sudo apt-get update
+sudo apt-get install -y python3 python3-venv python3-pip
+python3 -m venv venv
+./venv/bin/pip install --upgrade pip
+# V1B's own set (small, 3.14-friendly) — NOT the production requirements.txt
+./venv/bin/pip install -r requirements-v1b.txt
+
+# .env  (SECRET_KEY generated in place; do NOT paste it into chat)
+sudo cp deploy/vps/odivora.env.example .env
+sudo sed -i "s|^SECRET_KEY=.*|SECRET_KEY=$(openssl rand -hex 32)|" .env
+sudo grep -E '^(APP_ENV|DATABASE_URL|RELAY_)' .env
+
+# schema (fresh SQLite DB in this dir)
+./venv/bin/python - <<'PY'
+import sqlite3, glob
+c = sqlite3.connect("odivora_home.db")
+for f in sorted(glob.glob("migrations/00*.sql")):
+    for line in open(f):
+        s = line.strip()
+        if s.startswith(("ALTER", "CREATE", "UPDATE")):
+            try: c.execute(s.rstrip(";"))
+            except Exception: pass
+c.commit()
+print("schema applied")
+PY
+```
+ROLLBACK: sudo rm -rf /opt/odivora-v1b/venv /opt/odivora-v1b/.env /opt/odivora-v1b/odivora_home.db
+
+================================================================================
+9. BATCH C — SYSTEMD UNITS   [OWNER RUNS]
+================================================================================
+MACHINE: VPS. EFFECT: enables odivora-api + odivora-relay. Nothing else restarts.
+Artifacts in repo: deploy/vps/odivora-api.service, odivora-relay.service.
+
+```bash
+sudo cp /opt/odivora-v1b/deploy/vps/odivora-api.service   /etc/systemd/system/
+sudo cp /opt/odivora-v1b/deploy/vps/odivora-relay.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now odivora-relay odivora-api
+sleep 2
+systemctl --no-pager --full status odivora-relay odivora-api | sed -n '1,40p'
+curl -s http://127.0.0.1:8000/health; echo
+curl -s http://127.0.0.1:9090/sessions; echo
+sudo ss -lunp | grep -E ':3478|:20[0-9][0-9][0-9]\b' || true
+```
+EXPECTED: {"status":"ok"}, {"sessions": []}, UDP 3478 listening.
+ROLLBACK: sudo systemctl disable --now odivora-api odivora-relay
+
+================================================================================
+10. BATCH D — EXPOSE API + OPEN RELAY UDP PORTS   [OWNER RUNS]
+================================================================================
+MACHINE: VPS. EFFECT: makes the API reachable by phone+gateway and opens the
+relay data plane. 80/443/SSH/Docker untouched; NO route/NAT/FORWARD changes.
+
+D1. Relay data plane (do this regardless of exposure choice):
+```bash
+sudo ufw allow 20000:20999/udp
+sudo ufw allow 3478/udp
+sudo ufw status verbose
+# ALSO allow UDP 20000-20999 (and 3478) in the VPS PROVIDER control panel.
+```
+ROLLBACK: sudo ufw delete allow 20000:20999/udp && sudo ufw delete allow 3478/udp
+
+D2. API exposure — pick per Batch 2 output (see blocker B1). Do NOT run the old
+host-nginx commands from PREPARE_CODE_FOR_VPS.txt.
+
+  OPTION (b) separate host nginx on a dedicated port + Let's Encrypt (isolated):
+  ---------------------------------------------------------------
+  # (only if no host nginx and DNS-01 is possible for relay.odivora.com)
+  sudo apt-get install -y nginx certbot
+  # Configure host nginx to listen ONLY on 8443 (never 80/443):
+  sudo tee /etc/nginx/sites-available/odivora-v1b >/dev/null <<'CONF'
+  server {
+      listen 127.0.0.1:8443;
+      server_name relay.odivora.com;
+      location / { proxy_pass http://127.0.0.1:8000;
+                   proxy_set_header Host $host;
+                   proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for; }
+  }
+  CONF
+  sudo ln -sf /etc/nginx/sites-available/odivora-v1b /etc/nginx/sites-enabled/odivora-v1b
+  sudo nginx -t && sudo systemctl reload nginx
+  sudo ufw allow 8443/tcp        # only if clients must reach it directly
+  # rollback: rm the symlink+file, reload nginx, ufw delete allow 8443/tcp
+
+  OPTION (c) uvicorn TLS directly (simplest, no nginx):
+  ---------------------------------------------------------------
+  # obtain cert for relay.odivora.com (DNS-01 or standalone), then edit
+  # odivora-api.service ExecStart to:
+  #   --host 0.0.0.0 --port 8443 --ssl-keyfile <key> --ssl-certfile <cert>
+  # and: sudo ufw allow 8443/tcp
+  # rollback: revert ExecStart, sudo ufw delete allow 8443/tcp
+
+  OPTION (a) new server block in the Docker nginx (owner approval; touches prod):
+  ---------------------------------------------------------------
+  # Only if B showed a conf mount dir. Add relay.odivora.com -> 127.0.0.1:8000
+  # via the Docker bridge gateway IP (host.docker.internal), NOT 127.0.0.1
+  # (a container cannot reach the host loopback). Requires editing the prod
+  # compose/mounts => treats as a production change; owner decides.
+
+================================================================================
+11. BATCH E — VERIFY CONTROL PLANE (ON THE VPS)   [OWNER RUNS]
+================================================================================
+MACHINE: VPS. EFFECT: creates one throwaway user/session in the NEW DB only.
+
+```bash
+cd /opt/odivora-v1b
+./venv/bin/python scripts/e2e_smoke_test.py --api-base http://127.0.0.1:8000
+```
+EXPECTED: all steps OK ending "SMOKE TEST PASSED".
+ROLLBACK: stop services and delete /opt/odivora-v1b (see §14).
+
+================================================================================
+12. PHASE D — HOME UBUNTU GATEWAY   [OWNER RUNS]
+================================================================================
+MACHINE: home Ubuntu box (behind Starlink). Needs outgoing HTTPS to the API and
+outgoing UDP to relay. No router changes.
+
+```bash
+# 1. Packages + forwarding  (WireGuard lives HERE, not on the VPS)
+sudo apt update
+sudo apt install -y wireguard-tools python3 python3-venv iptables git
+sudo sysctl -w net.ipv4.ip_forward=1
+echo "net.ipv4.ip_forward=1" | sudo tee -a /etc/sysctl.conf
+
+# 2. Detect the real uplink interface (do NOT assume eth0)
+ip -o route show default
+
+# 3. Code + venv
+sudo mkdir -p /opt/odivora
+sudo rsync -a <DEV_USER>@<DEV_HOST>:/opt/odivora/ /opt/odivora/   # or git clone
+cd /opt/odivora
+python3 -m venv venv && ./venv/bin/pip install -r requirements.txt
+
+# 4. One-time provisioning (registers gateway, prints PAIRING CODE, mints the
+#    WireGuard keypair ON THIS DEVICE and uploads only the public half)
+sudo ./venv/bin/python firmware/linux_gateway/setup_gateway.py \
+    --api-base https://relay.odivora.com:8443
+
+# 5. Claim from the phone/account side, then set WAN interface if not eth0
+sudo grep -E '^(API_BASE|GATEWAY_ID|WAN_INTERFACE)=' /etc/odivora/gateway.env
+
+# 6. Start the daemon
+sudo cp firmware/linux_gateway/odivora-gateway.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now odivora-gateway
+sudo journalctl -u odivora-gateway -f
+```
+EXPECTED first lines: "[wg] wrote /etc/wireguard/wg0.conf ..." then "[sync] +0 -0 =0 peers".
+ROLLBACK: sudo systemctl disable --now odivora-gateway; sudo wg-quick down wg0
+
+================================================================================
+13. PHASE E/F — PHONE + REAL ROUTE + REVOCATION
+================================================================================
+Phone Wi-Fi OFF, on mobile data (Safaricom/Airtel/other). Same account that
+claimed the gateway.
+
+1. POST /api/v1/connections {"gateway_id": ...}                  -> session id
+2. POST /api/v1/sessions/{id}/authorize-wg {}                    -> assigned_ip + relay
+3. GET  /api/v1/sessions/{id}/wg-config                          -> odivora-xxxx.conf
+4. Import into WireGuard app, bring tunnel up.
+5. POST /api/v1/sessions/{id}/handshake                          -> status connected
+6. On the phone: open an HTTPS page and check the public IP equals the HOME
+   Starlink egress IP (same as any device on the home Wi-Fi).
+7. Disconnect: POST /api/v1/sessions/{id}/revoke-wg -> peer must vanish from
+   `sudo wg show` on the gateway within one sync interval, phone returns to LTE.
+8. Revocation: revoke gateway/device -> no new session/peer can re-establish.
+
+Record REAL measurements (latency/packet loss/throughput). Do not invent them.
+Verify the VPS default route, SSH, website and API still work throughout.
+Keep traffic low-volume; the VPS has limited RAM.
+
+================================================================================
+14. ROLLBACK — WHOLE V1B DEPLOY
+================================================================================
+```bash
+sudo systemctl disable --now odivora-api odivora-relay 2>/dev/null || true
+sudo rm -f /etc/systemd/system/odivora-api.service /etc/systemd/system/odivora-relay.service
+sudo systemctl daemon-reload
+sudo rm -f /etc/nginx/sites-enabled/odivora-v1b /etc/nginx/sites-available/odivora-v1b
+sudo systemctl reload nginx 2>/dev/null || true
+sudo ufw delete allow 20000:20999/udp 2>/dev/null || true
+sudo ufw delete allow 3478/udp 2>/dev/null || true
+sudo ufw delete allow 8443/tcp 2>/dev/null || true
+sudo rm -rf /opt/odivora-v1b
+```
+
+================================================================================
+15. RISK REGISTER / NEXT STEPS
+================================================================================
+- R1 Docker nginx exposure (blocker B1) — must not disturb production traffic.
+- R2 Python 3.14 dependency wheels (blocker B2).
+- R3 VPS RAM is tight (~3Gi available); API + relay are small, but keep tests
+     low-volume. Do not run stress tests.
+- R4 Provider firewall for UDP 20000-20999 unconfirmed (blocker B3).
+- R5 Boot persistence (VPS_RELAY.txt Phase 9) only AFTER a manual test passes.
+- R6 Future: direct peer-to-peer path / encrypted-packet relay is a separate
+     phase; design 1 already keeps ciphertext opaque at the relay.
+
+================================================================================
+APPENDIX — KEY FILES / ENDPOINTS
+================================================================================
+Cloud:   app/relay.py (alloc/reconcile), app/maintenance.py (lifespan reconcile),
+         app/routers/sessions_wg.py (authorize-wg, wg-config, handshake, revoke-wg),
+         app/routers/gateway_wg.py (peers, wg-public-key), app/config.py (RELAY_*).
+Relay:   firmware/relay/odivora_relay.py  (control 127.0.0.1:9090, UDP pairs).
+Gateway: firmware/linux_gateway/gateway_agent.py, app/gateway/dataplane.py,
+         firmware/linux_gateway/setup_gateway.py.
+Deploy:  deploy/vps/odivora-api.service, deploy/vps/odivora-relay.service,
+         deploy/vps/odivora.env.example.
+Tests:   tests/test_relay.py, tests/test_relay_api.py, tests/test_stage3_peer.py,
+         tests/test_stage4_gateway.py, tests/test_stage5_config.py.
+API:     POST /api/v1/connections | /sessions/{id}/authorize-wg | /wg-config |
+         /handshake | /revoke-wg | GET /api/v1/gateways/{id}/peers |
+         POST /api/v1/gateways/{id}/wg-public-key  (generate-keys is 410 Gone).

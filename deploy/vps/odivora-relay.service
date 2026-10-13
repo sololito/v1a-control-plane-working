@@ -1,0 +1,20 @@
+[Unit]
+Description=ODIVORA V1B Relay (UDP pair-forwarder, VPS co-located deploy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/odivora-v1b
+Environment=PYTHONUNBUFFERED=1
+# Control API is bound to loopback because the API server is co-located and is
+# its only client: no TCP 9090 rule is needed on UFW/the provider firewall.
+# The data plane (UDP 20000-20999) and rendezvous (UDP 3478) must be reachable
+# from the internet. This relay never decrypts WireGuard traffic.
+ExecStart=/opt/odivora-v1b/venv/bin/python /opt/odivora-v1b/firmware/relay/odivora_relay.py --control 127.0.0.1:9090 --rendezvous-port 3478
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

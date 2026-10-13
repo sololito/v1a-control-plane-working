@@ -1,0 +1,98 @@
+# ODIVORA V1B — BATCH A: place code at /opt/odivora-v1b + build the 3.14 venv
+# Owner-executed VPS steps. Assistant prepared everything on the dev box.
+# Prepared: 2026-10-13
+#
+# WHY THIS BATCH
+#   The pre-flight (BATCH_PREFLIGHT_EXECUTED_COMMANDS.txt) found:
+#     - no host nginx (nginx is a Docker container; production config is
+#       /opt/odivora/nginx.conf -> /etc/nginx/nginx.conf)  [exposure choice TBD]
+#     - ports 8000/8443/9443/9090 free
+#     - relay.odivora.com / api.odivora.com / odivora.com -> 204.13.234.26
+#     - Python 3.14.4; venv works.
+#   The earlier PIP_FAILED was a FALSE ALARM: it tried to install the
+#   PRODUCTION /opt/odivora/requirements.txt (Flask/torch/kokoro-onnx, which
+#   caps at Python <3.13). V1B has its own small requirement set, now shipped
+#   as requirements-v1b.txt. This batch installs THAT and proves it on 3.14.
+#
+# RULES: assistant runs nothing on the VPS. No secrets in chat/repo.
+
+================================================================================
+PART 1 — DEV BOX: deploy tarball already prepared (assistant)   [DONE]
+================================================================================
+Location: /tmp/opencode/odivora-v1b.tgz   (~313 KB)
+SHA256  : 15de7042a18407c9518c205774ba08348db2b289c034f52400d1ba28396772c2
+Contents: repo WITHOUT venv, .git, .env, *.db, __pycache__, .toolchain.
+Verify locally if you wish:
+    ls -lh /tmp/opencode/odivora-v1b.tgz
+    sha256sum /tmp/opencode/odivora-v1b.tgz
+    tar tzf /tmp/opencode/odivora-v1b.tgz | grep -E '\.env$|\.db$' || echo "clean (no secrets/dbs)"
+
+================================================================================
+PART 2 — DEV BOX: copy the tarball to the VPS   [OWNER RUNS]
+================================================================================
+MACHINE: dev box. EFFECT: writes one file to VPS /tmp only.
+    scp /tmp/opencode/odivora-v1b.tgz odivoraadmin@204.13.234.26:/tmp/
+ROLLBACK: rm /tmp/odivora-v1b.tgz on the VPS.
+
+(Alternative if you prefer rsync over scp:
+    rsync -az --delete \
+      --exclude 'venv/' --exclude '.git/' --exclude '.env' \
+      --exclude '*.db' --exclude '__pycache__/' --exclude '.toolchain/' \
+      /opt/odivora/ odivoraadmin@204.13.234.26:/tmp/odivora-v1b/
+ then on the VPS: sudo rsync -a /tmp/odivora-v1b/ /opt/odivora-v1b/ )
+
+================================================================================
+PART 3 — VPS: extract into the isolated dir   [OWNER RUNS]
+================================================================================
+MACHINE: VPS. EFFECT: creates/refreshes /opt/odivora-v1b ONLY. Production
+/opt/odivora, Docker, 80/443, SSH, routes and /etc/wireguard are untouched.
+
+    sudo rm -rf /opt/odivora-v1b
+    sudo mkdir -p /opt/odivora-v1b
+    sudo tar xzf /tmp/odivora-v1b.tgz -C /opt/odivora-v1b
+    sudo chown -R root:root /opt/odivora-v1b
+
+    echo "===== verify placement ====="
+    ls -la /opt/odivora-v1b/deploy/vps/
+    ls -l  /opt/odivora-v1b/requirements-v1b.txt
+    ls -l  /opt/odivora-v1b/firmware/relay/odivora_relay.py
+    test -f /opt/odivora-v1b/.env && echo "WARNING: .env present (should not be)" || echo "OK: no .env shipped"
+
+EXPECTED: the two .service files, requirements-v1b.txt, the relay, and
+"OK: no .env shipped".
+ROLLBACK: sudo rm -rf /opt/odivora-v1b
+
+================================================================================
+PART 4 — VPS: build the V1B venv and prove 3.14 deps install   [OWNER RUNS]
+================================================================================
+MACHINE: VPS. EFFECT: venv + site-packages inside /opt/odivora-v1b only.
+Resolves blocker B2 (Python 3.14 dependency feasibility).
+
+    cd /opt/odivora-v1b
+    sudo apt-get update
+    sudo apt-get install -y python3 python3-venv python3-pip
+    python3 -m venv venv
+    ./venv/bin/pip install --upgrade pip
+    ./venv/bin/pip install -r requirements-v1b.txt
+
+    echo "===== import check (fastapi, sqlalchemy, pydantic, jwt, crypto) ====="
+    ./venv/bin/python - <<'PY'
+    import fastapi, uvicorn, sqlalchemy, pydantic, jwt, cryptography, httpx
+    print("V1B deps OK:", fastapi.__version__, sqlalchemy.__version__, pydantic.VERSION)
+    PY
+
+EXPECTED: pip finishes without a build error, then "V1B deps OK: ...".
+If pip fails on a specific package, paste the error; we will adjust
+requirements-v1b.txt lower bounds (do NOT change the production
+/opt/odivora/requirements.txt).
+ROLLBACK: sudo rm -rf /opt/odivora-v1b/venv
+
+================================================================================
+AFTER THIS BATCH
+================================================================================
+Report PART 3 + PART 4 output. Next batch = B: write .env (SECRET_KEY generated
+in place), apply the SQLite migrations, then Batch C: install the two systemd
+units (odivora-api, odivora-relay). API exposure method (blocker B1) is still
+open: with no host nginx, the choices are (b) a separate host nginx on a
+dedicated port (8443) + cert, or (c) uvicorn TLS directly. We'll pick when we
+reach Batch D.

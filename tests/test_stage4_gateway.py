@@ -175,6 +175,46 @@ def test_linux_nat_uses_detected_wan_interface():
     assert not any("eth0" in c for c in applied), applied
 
 
+def test_resolve_wan_prefers_default_route_over_stale_configured_iface():
+    """A stale WAN_INTERFACE whose NIC still exists must not win.
+
+    Regression: moving the box from wired to Wi-Fi leaves `WAN_INTERFACE=
+    enp0s31f6` in gateway.env while that port sits DOWN. Existence probing
+    kept returning it, MASQUERADE matched 0 packets, and the phone got a
+    tunnel with no internet.
+    """
+    from app.gateway.dataplane import LinuxDataPlane
+
+    dp = LinuxDataPlane()
+    dp.wan_interface = "enp0s31f6"
+
+    class R:
+        def run(self, args):
+            joined = " ".join(args)
+            if joined.startswith("ip -o route show default"):
+                return 0, "default via 192.168.1.1 dev wlx00e02930bd8e proto dhcp metric 600"
+            if joined == "ip link show enp0s31f6":
+                return 0, "3: enp0s31f6: <BROADCAST,MULTICAST> state DOWN"
+            return 1, ""
+
+    dp.runner = R()
+    assert dp.resolve_wan_interface() == "wlx00e02930bd8e"
+
+
+def test_resolve_wan_falls_back_to_configured_when_no_default_route():
+    from app.gateway.dataplane import LinuxDataPlane
+
+    dp = LinuxDataPlane()
+    dp.wan_interface = "eth0"
+
+    class R:
+        def run(self, args):
+            return 1, "Cannot find device"
+
+    dp.runner = R()
+    assert dp.resolve_wan_interface() == "eth0"
+
+
 def test_sync_peers_reports_errors():
     """`wg set` failures must surface, not look like a successful sync."""
     from app.gateway.dataplane import LinuxDataPlane, PeerSpec

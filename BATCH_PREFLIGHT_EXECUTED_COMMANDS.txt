@@ -1,0 +1,206 @@
+odivoraadmin@vps3551802:~$ echo "===== A. Host nginx present? ====="
+v nginx >/dev/null && nginx -v 2>&1 || echo "(no host nginx; nginx is a Docker container)"
+ls -l /etc/nginx/sites-enabled/ 2>/dev/null || echo "(no host nginx ===== A. Host nginx present? =====
+odivoraadmin@vps3551802:~$ command -v nginx >/dev/null && nginx -v 2>&1 || echo "(no host nginx; nginx is a Docker container)"
+(no host nginx; nginx is a Docker container)
+odivoraadmin@vps3551802:~$ ls -l /etc/nginx/sites-enabled/ 2>/dev/null || echo "(no host nginx sites)"
+(no host nginx sites)
+
+
+odivoraadmin@vps3551802:~$ echo "===== B. Docker nginx: config + reachability ====="
+ {{end}}'
+sudo docker inspect nginx --format 'NET: {{range $k,$v := .NetworkSettings.Networks}}{{$k}}={{$v.IPAddress}} {{end}}'
+sudo===== B. Docker nginx: config + reachability =====
+ docker inspect affiliate-system --format 'affiliate IPodivoraadmin@vps3551802:~$ sudo docker inspect nginx --format 'MOUNTS: {{range .Mounts}}{{.Source}}->{{.Destination}} {{end}}'
+: {{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}'
+ip -4 addr show docker0 2>/dev/null | grep inet || true
+sudo docker exec nginx grep -rE 'server_name|listen|proxy_pass' /etc/nginx/conf.d /etc/nginx/nginx.conf 2>/dev/null | head -30sudo docker inspect nginx --format 'NET: {{range $k,$v := .NetworkSettings.Networks}}{{$k}}={{$v.IPAddress}} {{end}}'
+sudo docker inspect affiliate-system --format 'affiliate IP: {{range .NetworkSettings.Networks}}{{.IPAddress}} {{end}}'
+ip -4 addr show docker0 2>/dev/null | grep inet || true
+sudo docker exec nginx grep -rE 'server_name|listen|proxy_pass' /etc/nginx/conf.d /etc/nginx/nginx.conf 2>/dev/null | head -30MOUNTS: /srv/user-images->/srv/user-images /srv/app-data->/srv/app-data /srv/user-static/css->/srv/user-static/css /opt/odivora/nginx.conf->/etc/nginx/nginx.conf /var/www/certbot->/var/www/certbot /srv/user-uploads->/srv/user-uploads /srv/user-static/vendor->/srv/user-static/vendor /srv/uploads->/srv/uploads /srv/ssl->/etc/nginx/ssl
+
+
+odivoraadmin@vps3551802:~$
+===== C. Candidate API ports free? ====="odivoraadmin@vps3551802:~$ echo "===== C. Candidate API ports free? ====="
+ echo "(8000/8443/9443/9090 all free)"===== C. Candidate API ports free? =====
+odivoraadmin@vps3551802:~$ sudo ss -ltnp | grep -E ':(8000|8443|9443|9090)\b' || echo "(8000/8443/9443/9090 all free)"
+(8000/8443/9443/9090 all free)
+
+
+odivoraadmin@vps3551802:~$ echo "===== D1. Python version ====="
+ion
+===== D1. Python version =====
+odivoraadmin@vps3551802:~$ python3 --version
+Python 3.14.4
+odivoraadmin@vps3551802:~$ echo "===== D2. Requirements file ====="
+===== D2. Requirements file =====
+irements.txt
+else
+    echo "Requirements file not found at /opt/odivora/requirements.txt"
+fi
+
+echo "===== D3. Exisodivoraadmin@vps3551802:~$ if [ -f /opt/odivora/requirements.txt ]; then
+ting virtual environment ====="
+if [ -x /opt/odivora/ve>     ls -l /opt/odivora/requirements.txt
+>     sed -n '1,160p' /opt/odivora/requirements.txt
+> else
+>     echo "Requirements file not found at /opt/odivora/requirements.txt"
+> fi
+nv/bin/python ]; then
+    /opt/odivora/venv/bin/python --version
+else
+    echo "No venv found at /opt/odivora/-rw-rw-r-- 1 odivoraadmin odivoraadmin 2574 Aug 15 23:27 /opt/odivora/requirements.txt
+# Runtime dependency set for the shipped application (container + production).
+# Base: the M5 AST import-scan subset of the deployed tree, plus the union of the
+# runtime dependencies declared by the sub-system requirements files
+# (requirements-video.txt, requirements_invoice.txt, core_system/auto_poster/,
+# monetization/email_system/, monetization/paid_tools/memberzone/). Pins for
+# pre-existing packages come from the previous full freeze and win over the loose
+# >= specs in those sub-files. `gunicorn`/`waitress`/`transformers` stay since
+# they are container-critical even though they are not in the local Windows venv.
+# For the full development environment (all packages plus test/dev tooling), use
+# requirements-dev.txt. Do not add packages here that are only needed by tests or
+# by local Windows-only tooling (e.g. docx2pdf/pyttsx3/pywin32 is Windows-only).
+CairoSVG==2.8.2
+Faker==38.2.0
+Flask-Limiter==4.0.0
+Flask-Login==0.6.3
+Flask-Mail==0.10.0
+Flask-Migrate==4.1.0
+Flask-SQLAlchemy==3.1.1
+Flask-WTF==1.2.2
+Flask==3.1.2
+ImageIO==2.37.2
+Jinja2==3.1.6
+MarkupSafe==3.0.3
+PyJWT==2.10.1
+PyPDF2==3.0.1
+SQLAlchemy==2.0.44
+SpeechRecognition==3.14.4
+Unidecode==1.4.0
+WTForms==3.2.1
+Werkzeug==3.1.3
+APScheduler>=3.9.0
+alembic==1.17.2
+beautifulsoup4==4.14.2
+chardet==5.2.0
+cryptography==42.0.8
+edge-tts==7.2.3
+email-validator==2.2.0
+reportlab>=3.6.0
+Pillow>=8.0.0
+fastapi==0.123.5
+faster-whisper>=0.10.0
+ffmpeg-python==0.2.0
+flask-babel==4.0.0
+fpdf==1.7.2
+ftfy==6.3.1
+gTTS==2.5.4
+google-ai-generativelanguage==0.6.15
+google-api-core==2.25.2
+google-auth==2.41.1
+google-generativeai==0.8.5
+googleapis-common-protos==1.72.0
+gunicorn==23.0.0
+kokoro-onnx==0.3.9
+limits==5.6.0
+markdown>=3.3.0
+mutagen==1.47.0
+nltk==3.9.2
+numpy==2.2.6
+moviepy>=1.0.3
+onnxruntime==1.23.2
+openai-whisper==20250625
+opencv-python-headless==4.12.0.88
+pandas==2.3.3
+pdf2docx==0.5.13
+pdf2image==1.17.0
+pdfplumber==0.11.8
+pillow==12.0.0
+pillow_heif==1.1.1
+premailer>=3.10.0
+protobuf==5.29.5
+psutil==7.1.3
+psycopg2-binary==2.9.11
+pyOpenSSL==25.1.0
+pycairo==1.26.1
+pydantic==2.12.4
+pydub==0.25.1
+pymupdf==1.28.0
+pypdf==6.4.0
+pytesseract==0.3.13
+python-barcode==0.16.1
+python-dateutil==2.9.0.post0
+python-docx==1.2.0
+python-dotenv==1.2.1
+python-magic==0.4.27
+python-multipart==0.0.20
+python-slugify==8.0.4
+pytz==2025.2
+pyzbar==0.1.9
+qrcode==8.2
+rawpy==0.25.1
+rdflib==7.6.0
+rembg==2.0.68
+reportlab==4.4.5
+requests==2.32.5
+requests-oauthlib==2.0.0
+schedule==1.2.2
+soundfile==0.14.0
+srt==3.5.3
+tabulate==0.9.0
+torch==2.5.1
+transformers==5.14.1
+tweepy==4.16.0
+urllib3==2.5.0
+uvicorn==0.38.0
+waitress==3.0.2
+odivoraadmin@vps3551802:~$
+odivoraadmin@vps3551802:~$ echo "===== D3. Existing virtual environment ====="
+venv"
+fi===== D3. Existing virtual environment =====
+odivoraadmin@vps3551802:~$ if [ -x /opt/odivora/venv/bin/python ]; then
+>     /opt/odivora/venv/bin/python --version
+> else
+>     echo "No venv found at /opt/odivora/venv"
+> fi
+No venv found at /opt/odivora/venv
+
+
+odivoraadmin@vps3551802:~$ echo "===== E. DNS / existing TLS ====="
+===== E. DNS / existing TLS =====
+odivoraadmin@vps3551802:~$ getent hosts relay.odivora.com api.odivora.com odivora.com || true
+204.13.234.26   relay.odivora.com
+204.13.234.26   api.odivora.com
+204.13.234.26   odivora.com
+odivoraadmin@vps3551802:~$
+
+odivoraadmin@vps3551802:~$ echo "===== PYTHON VERSION ====="
+===== PYTHON VERSION =====
+odivoraadmin@vps3551802:~$ python3 --version
+Python 3.14.4
+odivoraadmin@vps3551802:~$
+heck-venv/bin/python -m pip --versionodivoraadmin@vps3551802:~$ echo "===== CREATE TEMPORARY VENV ====="
+===== CREATE TEMPORARY VENV =====
+odivoraadmin@vps3551802:~$ rm -rf /tmp/v1b-check-venv
+odivoraadmin@vps3551802:~$ python3 -m venv /tmp/v1b-check-venv
+odivoraadmin@vps3551802:~$
+odivoraadmin@vps3551802:~$ echo "===== VERIFY VENV ====="
+===== VERIFY VENV =====
+odivoraadmin@vps3551802:~$ /tmp/v1b-check-venv/bin/python --version
+Python 3.14.4
+odivoraadmin@vps3551802:~$ /tmp/v1b-check-venv/bin/python -m pip --version
+pip 25.1.1 from /tmp/v1b-check-venv/lib/python3.14/site-packages/pip (python 3.14)
+odivoraadmin@vps3551802:~$
+
+The specific blocker is:
+kokoro-onnx==0.3.9 requires Python >=3.9,<3.13, so it cannot be installed under Python 3.14.
+This does not mean V1B is a failure. It means we have not yet proved that the chosen Python version and dependency set work together.
+What I recommend
+Since we're building V1B separately, we should avoid changing the existing /opt/odivora/requirements.txt just to make this test pass.
+First, confirm which Python version V1B is intended to use and which requirements file belongs to V1B. If V1B is explicitly meant to use Python 3.14 and the same dependency list, we'll need to resolve that incompatibility before calling the environment ready.
+One important distinction: this test checks package installation only. Even PIP_OK would not, by itself, prove that the application starts or that its features work.
+We should proceed with V1B's actual requirements rather than modifying the existing application's dependencies.
+
+
+

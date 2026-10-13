@@ -45,7 +45,7 @@ fun SetupScreen(onDone: () -> Unit) {
         OutlinedTextField(
             value = url,
             onValueChange = { url = it },
-            label = { Text("https://image-valley-sealed-donald.trycloudflare.com") },
+            label = { Text("http://192.168.1.191:8000") },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )

@@ -1,0 +1,146 @@
+# ODIVORA V1B — VPS Command Log & Runbook
+
+Working toward VPS_RELAY.txt. All VPS operations are **owner-executed**; this
+file records the exact commands, one controlled batch at a time, with rollback.
+
+Design chosen: repo **design 1** — the VPS hosts the **backend API** and the
+**relay (UDP pair-forwarder)**. The home gateway dials out to the relay; the
+phone dials the relay. No port forwarding at home. The two-interface routed
+hub (VPS_RELAY.txt §3, design 2) is intentionally NOT used: it is not needed,
+and design 1 keeps WireGuard end-to-end encrypted (the relay never decrypts) and
+needs no VPS routing / default-route / NAT / FORWARD changes.
+
+---
+
+## Phase A baseline (this dev box, not the VPS)
+
+- `pytest -q` → **201 passed** in 549.98s (2479 pre-existing warnings).
+- Local runtime verification with relay + backend co-located:
+  - `scripts/e2e_smoke_test.py` → all 11 steps OK.
+  - UDP data-path check → relay forwards ciphertext phone<->gateway both ways.
+
+### Change made (repo)
+
+- `scripts/e2e_smoke_test.py`: replaced the removed `POST /gateways/{id}/generate-keys`
+  (now `410 Gone`) with the current flow — the gateway generates its own X25519
+  key and uploads only the public half to `POST /gateways/{id}/wg-public-key`.
+
+---
+
+## Target topology
+
+```text
+Remote phone ──┐
+               │ UDP 51820? no — UDP relay pair 20000-20999
+               ▼
+        ODIVORA VPS (public 204.13.234.26)
+        ├── odivora-api     :8000   (control plane; phone + gateway reach it)
+        └── odivora-relay   :9090   (control, localhost) + UDP 20000-20999 (pairs)
+               ▲
+               │ outbound UDP
+        Home Ubuntu gateway (behind Starlink CGNAT) ── wg0 + NAT ── Starlink ── Internet
+```
+
+Backend discovery for phone/gateway is over HTTPS (nginx 80/443) or a dedicated
+port; the relay pair ports are raw UDP.
+
+---
+
+## Firewall matrix (design 1)
+
+| Port | Proto | Purpose | Source |
+|------|-------|---------|--------|
+| 20000-20999 | UDP | WireGuard relay pairs | any |
+| 3478 | UDP | rendezvous (STUN-lite), optional | any |
+| 9090 | TCP | relay control API | **localhost only** (both services co-located) |
+| 8000 / 443 | TCP | backend API | phone + home gateway |
+
+Ports 80/443, SSH, and Docker are **not** modified. `wg-phone`/`wg-home`,
+UDP 51820/51821 are **not** touched (leftover from the hub plan; unused here).
+
+---
+
+## Batch 1 — VPS read-only inspection (RUN THIS ON THE VPS)
+
+Read-only: no file, service, route, or firewall changes. Private keys are
+stripped from output. Do not manually paste key material.
+
+```bash
+echo "===== 1. System / resources ====="
+uname -a; grep -E '^(NAME|VERSION)=' /etc/os-release
+python3 --version; command -v python3 git
+free -h; df -h /opt
+echo "===== 2. What is /opt/odivora (production) ====="
+ls -la /opt/odivora | head -30
+git -C /opt/odivora remote -v 2>/dev/null; git -C /opt/odivora log --oneline -1 2>/dev/null
+echo "===== 3. Existing services / listeners ====="
+systemctl list-units --type=service --state=running | grep -iE 'odivora|relay|wg|nginx|docker' || true
+systemctl list-unit-files | grep -iE 'odivora|wg-quick' || true
+sudo ss -ltnp | grep -E ':(80|443|8000|8080|8443|9090)\b' || true
+sudo ss -lunp | grep -E ':(3478|51820|51821)\b' || true
+echo "===== 4. Relay port range free? ====="
+sudo ss -lunp | grep -E ':20[0-9][0-9][0-9]\b' || echo "(20000-20999 all free)"
+echo "===== 5. Firewall ====="
+sudo ufw status verbose
+echo "===== 6. Nginx (to expose the API without touching ports 80/443 layout) ====="
+ls -l /etc/nginx/sites-enabled/ 2>/dev/null
+sudo nginx -T 2>/dev/null | grep -E 'server_name|listen|proxy_pass' | head -40
+echo "===== 7. Docker (do not touch) ====="
+docker ps --format '{{.Names}}\t{{.Ports}}' 2>/dev/null || echo "(no docker access)"
+echo "===== 8. WireGuard state (public keys only) ====="
+sudo grep -vr -i 'privatekey' /etc/wireguard/ 2>/dev/null || echo "(no readable /etc/wireguard or all private)"
+```
+
+**Also confirm in the VPS provider control panel:** inbound **UDP 20000-20999**
+(and whether UDP 3478 is allowed), plus which public port/subdomain the backend
+API should use.
+
+### Before running Batch 2, report back
+
+1. Is `/opt/odivora` the production app? (we deploy to a **separate** dir, e.g.
+   `/opt/odivora-v1b`, and a separate SQLite DB).
+2. Are TCP 8000 and 9090 free? Is UDP 20000-20999 free?
+3. How will the API be exposed — existing nginx (subdomain) or a dedicated port?
+
+---
+
+## Batch 2 — deploy backend + relay (PLACEHOLDER — issue after Batch 1 output)
+
+```text
+(to be generated once Batch 1 results + provider-firewall answer are known)
+
+Planned shape, all owner-executed with rollback:
+  1. git clone this repo -> /opt/odivora-v1b (never touch /opt/odivora)
+  2. python3 -m venv /opt/odivora-v1b/venv
+     pip install -r requirements.txt
+  3. .env for the new dir:
+       APP_ENV=prod
+       SECRET_KEY=<openssl rand -hex 32>
+       DATABASE_URL=sqlite:////opt/odivora-v1b/odivora_home.db
+       RELAY_CONTROL_URL=http://127.0.0.1:9090
+       RELAY_PUBLIC_HOST=204.13.234.26
+       RELAY_PORT_START=20000
+       RELAY_PORT_END=20999
+  4. apply migrations/00*.sql to the new DB
+  5. install odivora-api.service + odivora-relay.service (repointed ExecStart
+     to /opt/odivora-v1b/venv/bin/python, relay control bound to 127.0.0.1:9090)
+  6. expose the API (nginx subdomain or dedicated UFW port)
+  7. UFW: allow UDP 20000-20999 (and 3478); do NOT touch SSH/80/443/Docker
+  8. verify: curl /health; PUT/DELETE a test pair against 127.0.0.1:9090
+```
+
+---
+
+## Rollback (applies to every batch)
+
+```bash
+# services (only the v1b ones; production untouched)
+sudo systemctl disable --now odivora-api odivora-relay 2>/dev/null || true
+sudo rm -f /etc/systemd/system/odivora-api.service /etc/systemd/system/odivora-relay.service
+sudo systemctl daemon-reload
+# firewall: remove only the rules we added
+sudo ufw delete allow 20000:20999/udp 2>/dev/null || true
+sudo ufw delete allow 3478/udp 2>/dev/null || true
+# files: the isolated deploy dir only
+sudo rm -rf /opt/odivora-v1b
+```

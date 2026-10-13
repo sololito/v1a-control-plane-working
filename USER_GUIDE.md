@@ -4,7 +4,7 @@ End-to-end operating instructions for the ODIVORA Home Connectivity platform: th
 cloud API, the relay, the Linux home gateway, and connecting a phone over WireGuard.
 
 Everything in this guide was executed and verified against a live install on
-`192.168.10.159`.
+`192.168.1.191`.
 
 ---
 

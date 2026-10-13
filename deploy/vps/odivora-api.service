@@ -1,0 +1,19 @@
+[Unit]
+Description=ODIVORA V1B API (control plane, VPS co-located deploy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/odivora-v1b
+Environment=PYTHONUNBUFFERED=1
+# Bound to loopback: the public front door is nginx (see runbook), so no new
+# inbound TCP port is opened on the VPS. Change to 0.0.0.0 only if you expose
+# the API on a dedicated UFW port instead of the existing nginx.
+ExecStart=/opt/odivora-v1b/venv/bin/python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,388 @@
+odivoraadmin@vps3551802:~$ uname -a
+ -h
+df -h /optLinux vps3551802 7.0.0-29-generic #29-Ubuntu SMP PREEMPT_DYNAMIC Fri Jul 17 20:52:35 UTC 2026 x86_64 GNU/Linux
+odivoraadmin@vps3551802:~$ grep -E '^(NAME|VERSION)=' /etc/os-release
+NAME="Ubuntu"
+VERSION="26.04 LTS (Resolute Raccoon)"
+odivoraadmin@vps3551802:~$ python3 --version
+Python 3.14.4
+odivoraadmin@vps3551802:~$ command -v python3 git
+/usr/bin/python3
+/usr/bin/git
+odivoraadmin@vps3551802:~$ free -h
+               total        used        free      shared  buff/cache   available
+Mem:           5.3Gi       2.3Gi       516Mi        46Mi       2.8Gi       3.0Gi
+Swap:          1.0Gi        74Mi       949Mi
+
+
+odivoraadmin@vps3551802:~$ df -h /optecho "===== 2. EXISTING ODIVORA PRODUCTION DIRECTORY ====="
+df: /optecho: No such file or directory
+df: '===== 2. EXISTING ODIVORA PRODUCTION DIRECTORY =====': No such file or directory
+odivoraadmin@vps3551802:~$ ls -la /opt/odivora | head -30
+total 69764
+drwxr-xr-x 11 odivoraadmin odivoraadmin     4096 Oct 11 04:42 .
+drwxr-xr-x  4 root         root             4096 Aug 12 14:15 ..
+-rw-rw-r--  1 odivoraadmin odivoraadmin     5088 Aug 21 18:11 .dockerignore
+-rw-rw-r--  1 odivoraadmin odivoraadmin     6583 Sep 12 15:43 .env
+-rw-rw-r--  1 odivoraadmin odivoraadmin    12876 Sep 12 16:59 .env.example
+drwxrwxr-x  7 odivoraadmin odivoraadmin     4096 Oct 11 04:42 .git
+-rw-rw-r--  1 odivoraadmin odivoraadmin     4539 Sep  9 16:21 .gitignore
+-rw-rw-r--  1 odivoraadmin odivoraadmin        0 Sep 14 17:10 =0.10.0
+-rw-rw-r--  1 odivoraadmin odivoraadmin    12142 Sep 14 03:46 AUTOPOSTER_CREDENTIALS_MAPPING.md
+-rw-rw-r--  1 odivoraadmin odivoraadmin     4944 Sep  9 16:21 Dockerfile
+-rw-rw-r--  1 odivoraadmin odivoraadmin    16965 Sep 14 03:46 EMAIL_QUEUE_IMPLEMENTATION_SURVEY.md
+-rw-rw-r--  1 odivoraadmin odivoraadmin    10128 Sep 14 03:46 ERROR_ANALYSIS_LOCAL_VS_VPS.md
+-rw-rw-r--  1 odivoraadmin odivoraadmin    20660 Sep 11 03:16 PIPELINE_DOCS.md
+-rw-rw-r--  1 odivoraadmin odivoraadmin   100832 Aug 12 15:44 PRODUCTION_READINESS_AUDIT_2026.md
+-rw-rw-r--  1 odivoraadmin odivoraadmin    16789 Sep  9 16:21 README.md
+-rw-rw-r--  1 odivoraadmin odivoraadmin     3661 Aug 15 14:34 REQUIREMENTS_STRUCTURE.md
+-rw-rw-r--  1 odivoraadmin odivoraadmin    11089 Sep 14 03:46 SUBTITLE_GENERATION_FIX.md
+-rw-rw-r--  1 odivoraadmin odivoraadmin    10184 Sep 14 03:46 SUBTITLE_TEST_REPORT.md
+-rw-rw-r--  1 odivoraadmin odivoraadmin    14015 Sep 14 03:46 VPS_SUBTITLE_DEPLOYMENT.md
+-rw-rw-r--  1 odivoraadmin odivoraadmin      220 Sep 12 03:16 _tmp_pc.txt
+drwxrwxr-x  3 odivoraadmin odivoraadmin     4096 Oct 11 04:42 config
+drwxrwxr-x  6 odivoraadmin odivoraadmin     4096 Aug 31 22:25 core_system
+-rw-rw-r--  1 odivoraadmin odivoraadmin     3229 Sep  9 16:21 db_conn.py
+-rw-rw-r--  1 odivoraadmin odivoraadmin     3002 Aug 31 22:25 db_setup.py
+-rw-rw-r--  1 odivoraadmin odivoraadmin    14994 Aug 12 15:44 device_power_detection.py
+-rw-rw-r--  1 odivoraadmin odivoraadmin    11420 Sep 12 16:59 docker-compose.yml
+-rw-rw-r--  1 odivoraadmin odivoraadmin    11065 Aug 31 13:32 docker-compose.yml.bak
+-rw-rw-r--  1 odivoraadmin odivoraadmin    33968 Oct 11 04:42 docker_startup.py
+drwxrwxr-x  2 odivoraadmin odivoraadmin     4096 Sep 14 03:46 docs
+ll || trueodivoraadmin@vps3551802:~$ git -C /opt/odivora log --oneline -1 2>/dev/null || true
+000d38b (HEAD -> main, origin/main, origin/HEAD) update campaign
+
+odivoraadmin@vps3551802:~$ echo "===== 3. EXISTING SERVICES ====="
+===== 3. EXISTING SERVICES =====
+odivoraadmin@vps3551802:~$ systemctl list-units --type=service --state=running \
+>   | grep -iE 'odivora|relay|wg|nginx|docker' || true
+  docker.service              loaded active running Docker Application Container Engine
+ick' || trueodivoraadmin@vps3551802:~$
+odivoraadmin@vps3551802:~$ systemctl list-unit-files \
+>   | grep -iE 'odivora|wg-quick' || true
+wg-quick@.service                                                             disabled        enabled
+wg-quick.target                                                               static          -
+
+
+odivoraadmin@vps3551802:~$ echo "===== 4. TCP PORTS ====="
+' || t===== 4. TCP PORTS =====
+odivoraadmin@vps3551802:~$ sudo ss -ltnp \
+>   | grep -E ':(80|443|8000|8080|8443|9090)\b' || true
+[sudo: authenticate] Password:
+LISTEN 0      4096         0.0.0.0:443       0.0.0.0:*    users:(("docker-proxy",pid=2405975,fd=8))
+LISTEN 0      4096         0.0.0.0:80        0.0.0.0:*    users:(("docker-proxy",pid=2405956,fd=8))
+LISTEN 0      4096            [::]:443          [::]:*    users:(("docker-proxy",pid=2405982,fd=8))
+LISTEN 0      4096            [::]:80           [::]:*    users:(("docker-proxy",pid=2405962,fd=8))
+
+odivoraadmin@vps3551802:~$ sudo ss -lunp \
+>   | grep -E ':(3478|51820|51821)\b' || true
+UNCONN 0      0                 0.0.0.0:51820      0.0.0.0:*
+UNCONN 0      0                 0.0.0.0:51821      0.0.0.0:*
+UNCONN 0      0                    [::]:51820         [::]:*
+UNCONN 0      0                    [::]:51821         [::]:*
+
+
+
+odivoraadmin@vps3551802:~$ echo "===== 6. PROPOSED RELAY PORT RANGE ====="
+{3}\b' \
+  || echo "No listeners found in UDP ports 200===== 6. PROPOSED RELAY PORT RANGE =====
+odivoraadmin@vps3551802:~$ sudo ss -lunp \
+>   | grep -E ':20[0-9]{3}\b' \
+>   || echo "No listeners found in UDP ports 20000-20999"
+No listeners found in UDP ports 20000-20999
+
+
+odivoraadmin@vps3551802:~$ echo "===== 7. FIREWALL ====="
+===== 7. FIREWALL =====
+odivoraadmin@vps3551802:~$ sudo ufw status verbose
+Status: active
+Logging: on (low)
+Default: deny (incoming), allow (outgoing), deny (routed)
+New profiles: skip
+
+To                         Action      From
+--                         ------      ----
+22/tcp (OpenSSH)           ALLOW IN    Anywhere
+80/tcp                     ALLOW IN    Anywhere
+443/tcp                    ALLOW IN    Anywhere
+51820/udp                  ALLOW IN    Anywhere                   # ODIVORA phone WireGuard
+51821/udp                  ALLOW IN    Anywhere                   # ODIVORA home gateway WireGuard
+22/tcp (OpenSSH (v6))      ALLOW IN    Anywhere (v6)
+80/tcp (v6)                ALLOW IN    Anywhere (v6)
+443/tcp (v6)               ALLOW IN    Anywhere (v6)
+51820/udp (v6)             ALLOW IN    Anywhere (v6)              # ODIVORA phone WireGuard
+51821/udp (v6)             ALLOW IN    Anywhere (v6)              # ODIVORA home gateway WireGuard
+
+odivoraadmin@vps3551802:~$ sudo docker exec nginx nginx -T 2>&1 \
+>   | grep -E 'server_name|listen|proxy_pass' \
+>   | head -40
+2026/10/13 11:02:35 [warn] 39545#39545: the "listen ... http2" directive is deprecated, use the "http2" directive instead in /etc/nginx/nginx.conf:114
+nginx: [warn] the "listen ... http2" directive is deprecated, use the "http2" directive instead in /etc/nginx/nginx.conf:114
+# 1. The Flask app container listens on port 10000 (see Dockerfile EXPOSE and
+#    docker_startup.py). All proxy_pass entries below target :10000.
+        listen 80;
+        server_name _;
+            proxy_pass http://affiliate-system:10000/health;
+        listen 443 ssl http2;
+        server_name _;
+            proxy_pass http://affiliate-system:10000/health;
+            proxy_pass http://affiliate-system:10000;
+            proxy_pass http://affiliate-system:10000;
+            proxy_pass http://affiliate-system:10000;
+            proxy_pass http://affiliate-system:10000;
+
+odivoraadmin@vps3551802:~$ echo "===== 9. RUNNING DOCKER CONTAINERS ====="
+.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}'===== 9. RUNNING DOCKER CONTAINERS =====
+odivoraadmin@vps3551802:~$ sudo docker ps \
+>   --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}'
+NAMES              IMAGE                      PORTS                                                                          STATUS
+affiliate-system   odivora-affiliate-system   10000/tcp                                                                      Up 2 days (healthy)
+mqtt-broker        eclipse-mosquitto:2                                                                                       Restarting (1) 34 seconds ago
+memberzone-db      postgres:16-alpine         5432/tcp                                                                       Up 4 weeks (healthy)
+nginx              nginx:1.27-alpine          0.0.0.0:80->80/tcp, [::]:80->80/tcp, 0.0.0.0:443->443/tcp, [::]:443->443/tcp   Up 47 hours (healthy)
+
+
+odivoraadmin@vps3551802:~$ echo "===== 10. WIREGUARD FILE INVENTORY ONLY ====="
+ype f \
+  -printf '%M %u:%g %f\n' 2>/dev/null \
+  || echo "No readable WireGuard directory"===== 10. WIREGUARD FILE INVENTORY ONLY =====
+odivoraadmin@vps3551802:~$ sudo find /etc/wireguard -maxdepth 1 -type f \
+>   -printf '%M %u:%g %f\n' 2>/dev/null \
+>   || echo "No readable WireGuard directory"
+-rw------- root:root wg-home.conf
+-rw-r--r-- root:root odivora-server.pub
+-rw-r--r-- root:root wg-home-server.pub
+-rw------- root:root wg-home-server.key
+-rw------- root:root odivora-server.key
+-rw------- root:root wg-phone.conf
+
+
+odivoraadmin@vps3551802:~$ echo "===== TCP PORTS ====="
+grep -E ':(80|443|8000|8080|8443|9090)\b' || true
+
+echo "===== UDP PORTS ====="
+sudo ss -lunp | grep -E ':(3478|51820|51821)\b' || true
+
+echo "===== FIREWALL ====="
+sudo ufw status verbose===== TCP PORTS =====
+odivoraadmin@vps3551802:~$ sudo ss -ltnp | grep -E ':(80|443|8000|8080|8443|9090)\b' || true
+LISTEN 0      4096         0.0.0.0:443       0.0.0.0:*    users:(("docker-proxy",pid=2405975,fd=8))
+LISTEN 0      4096         0.0.0.0:80        0.0.0.0:*    users:(("docker-proxy",pid=2405956,fd=8))
+LISTEN 0      4096            [::]:443          [::]:*    users:(("docker-proxy",pid=2405982,fd=8))
+LISTEN 0      4096            [::]:80           [::]:*    users:(("docker-proxy",pid=2405962,fd=8))
+odivoraadmin@vps3551802:~$
+odivoraadmin@vps3551802:~$ echo "===== UDP PORTS ====="
+===== UDP PORTS =====
+odivoraadmin@vps3551802:~$ sudo ss -lunp | grep -E ':(3478|51820|51821)\b' || true
+UNCONN 0      0                 0.0.0.0:51820      0.0.0.0:*
+UNCONN 0      0                 0.0.0.0:51821      0.0.0.0:*
+UNCONN 0      0                    [::]:51820         [::]:*
+UNCONN 0      0                    [::]:51821         [::]:*
+odivoraadmin@vps3551802:~$
+odivoraadmin@vps3551802:~$ echo "===== FIREWALL ====="
+===== FIREWALL =====
+odivoraadmin@vps3551802:~$ sudo ufw status verbose
+Status: active
+Logging: on (low)
+Default: deny (incoming), allow (outgoing), deny (routed)
+New profiles: skip
+
+To                         Action      From
+--                         ------      ----
+22/tcp (OpenSSH)           ALLOW IN    Anywhere
+80/tcp                     ALLOW IN    Anywhere
+443/tcp                    ALLOW IN    Anywhere
+51820/udp                  ALLOW IN    Anywhere                   # ODIVORA phone WireGuard
+51821/udp                  ALLOW IN    Anywhere                   # ODIVORA home gateway WireGuard
+22/tcp (OpenSSH (v6))      ALLOW IN    Anywhere (v6)
+80/tcp (v6)                ALLOW IN    Anywhere (v6)
+443/tcp (v6)               ALLOW IN    Anywhere (v6)
+51820/udp (v6)             ALLOW IN    Anywhere (v6)              # ODIVORA phone WireGuard
+51821/udp (v6)             ALLOW IN    Anywhere (v6)              # ODIVORA home gateway WireGuard
+
+odivoraadmin@vps3551802:~$ echo "===== 1. ACTIVE NGINX CONFIGURATION ====="
+ grep -E 'server_name|listen|proxy_pass' \
+  | head -40
+
+echo "===== 2. RUNNING DOCKER CONTAINERS ====="
+sudo docker ps --format===== 1. ACTIVE NGINX CONFIGURATION =====
+ 'table odivoraadmin@vps3551802:~$ sudo docker exec nginx nginx -T 2>&1 \
+>   | grep -E 'server_name|listen|proxy_pass' \
+>   | head -40
+{{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}'
+
+echo "===== 3. WIREGUARD STATUS ====="
+sudo wg show
+
+echo "===== 4. WIREGUARD FILE INVENTORY ====="
+sudo find /etc/wireguard -maxdepth 1 -type f \
+  -printf '%M %u:%g %f\n' 2>/dev/null \
+  || echo "No readable WireGuard directory"2026/10/13 11:06:36 [warn] 39606#39606: the "listen ... http2" directive is deprecated, use the "http2" directive instead in /etc/nginx/nginx.conf:114
+nginx: [warn] the "listen ... http2" directive is deprecated, use the "http2" directive instead in /etc/nginx/nginx.conf:114
+# 1. The Flask app container listens on port 10000 (see Dockerfile EXPOSE and
+#    docker_startup.py). All proxy_pass entries below target :10000.
+        listen 80;
+        server_name _;
+            proxy_pass http://affiliate-system:10000/health;
+        listen 443 ssl http2;
+        server_name _;
+            proxy_pass http://affiliate-system:10000/health;
+            proxy_pass http://affiliate-system:10000;
+            proxy_pass http://affiliate-system:10000;
+            proxy_pass http://affiliate-system:10000;
+            proxy_pass http://affiliate-system:10000;
+odivoraadmin@vps3551802:~$
+odivoraadmin@vps3551802:~$ echo "===== 2. RUNNING DOCKER CONTAINERS ====="
+===== 2. RUNNING DOCKER CONTAINERS =====
+odivoraadmin@vps3551802:~$ sudo docker ps --format 'table {{.Names}}\t{{.Image}}\t{{.Ports}}\t{{.Status}}'
+
+echo "===== 3. WIREGUARD STATUS ====="
+sudo wg show
+
+echo "===== 4. WIREGUARD FILE INVENTORY ====="
+sudo find /etc/wireguard -maxdepth 1 -type f \
+  -printf '%M %u:%g %f\n' 2>/dev/null \
+  || echo "No readable WireGuard directory"NAMES              IMAGE                      PORTS                                                                          STATUS
+affiliate-system   odivora-affiliate-system   10000/tcp                                                                      Up 2 days (healthy)
+mqtt-broker        eclipse-mosquitto:2                                                                                       Restarting (1) 59 seconds ago
+memberzone-db      postgres:16-alpine         5432/tcp                                                                       Up 4 weeks (healthy)
+nginx              nginx:1.27-alpine          0.0.0.0:80->80/tcp, [::]:80->80/tcp, 0.0.0.0:443->443/tcp, [::]:443->443/tcp   Up 47 hours (healthy)
+
+
+
+## ODIVORA VPS — Operational Note: MQTT Broker
+
+**Date:** 13 October 2026
+
+**Container:** `mqtt-broker`  
+**Image:** `eclipse-mosquitto:2`  
+**Observed status:** `Restarting (1)`
+
+**Decision:** The MQTT broker's restarting state is intentional for the current deployment and must not be treated as an active fault requiring investigation.
+
+**Instructions for future troubleshooting:**
+- Do not investigate, restart, rebuild, remove, or modify `mqtt-broker` unless explicitly instructed.
+- Do not include MQTT in routine fault-finding or service-recovery procedures.
+- Preserve its current configuration and related resources for its intended future use.
+- Continue investigating other ODIVORA services independently.
+- Revisit MQTT only when its planned purpose or deployment requirements call for it.
+
+**Scope:** This exception applies only to the MQTT broker. It does not exempt Nginx, the affiliate system, the database, WireGuard, or the ODIVORA gateway from normal health checks.
+
+**Status:** Intentional condition — no action required at present.
+
+# OPERATIONAL EXCEPTION:
+# mqtt-broker restarting is intentional.
+# Do not troubleshoot or modify it unless explicitly requested.
+
+# ODIVORA V1B — VPS Findings and Strict Website/Relay Separation
+
+## 1. Project objective
+
+Continue development of the ODIVORA V1B crypto gateway/relay integration. The objective is to develop and integrate the new relay infrastructure without disrupting the existing ODIVORA website, affiliate system, database, or other production services.
+
+## 2. Verified VPS findings — 13 October 2026
+
+The following results were observed on the VPS:
+
+### Nginx
+- Container: `nginx`
+- Image: `nginx:1.27-alpine`
+- Status: Up 47 hours, healthy.
+- Public port mappings: TCP 80 and TCP 443.
+- Configured server name: `_`.
+- Existing proxy destinations include `http://affiliate-system:10000`.
+- Nginx reports a deprecated HTTP/2 directive at `/etc/nginx/nginx.conf:114`. This is a warning, not confirmed evidence of a service failure.
+
+### Existing affiliate application
+- Container: `affiliate-system`
+- Image: `odivora-affiliate-system`
+- Status: Up 2 days, healthy.
+- Internal application port: 10000/tcp.
+- This is an existing service and must be preserved.
+
+### Existing database
+- Container: `memberzone-db`
+- Image: `postgres:16-alpine`
+- Status: Up 4 weeks, healthy.
+- Internal port: 5432/tcp.
+- Do not modify its data, schema, credentials, or configuration.
+
+### MQTT broker
+- Container: `mqtt-broker`
+- Image: `eclipse-mosquitto:2`
+- Observed status: Restarting (1).
+- The owner has explicitly confirmed that this condition is intentional for its planned use.
+- Do not investigate, restart, rebuild, remove, or modify this container unless explicitly instructed.
+
+### WireGuard
+- Its actual interface status, peer handshakes, configuration files, and port bindings have not yet been verified from the supplied output.
+- Do not assume WireGuard is running or that the relay is already operational.
+
+## 3. Mandatory separation of systems
+
+The existing production website and affiliate platform must remain separate from the new V1B relay/gateway project.
+
+Previously established project conventions:
+- Isolated project workspace: `/opt/odivora-v1b`
+- Backend API domain: `https://api.odivora.com`
+- Relay domain: `relay.odivora.com`
+- Relay control interface: localhost only
+
+Treat these as established design targets, not proof that DNS, certificates, services, or deployment are already configured.
+
+Do not reuse or overwrite the existing website's Nginx configuration, application containers, database, volumes, Docker Compose deployment, or credentials.
+
+Do not introduce broad Nginx routing rules that could redirect existing website traffic to the relay.
+
+## 4. What you are authorized to do now
+
+1. Inspect the existing project files and Git repository.
+2. Inspect the isolated `/opt/odivora-v1b` workspace if accessible.
+3. Identify the current implementation state and missing components.
+4. Review existing configuration without exposing secrets.
+5. Develop and test application code in the isolated workspace.
+6. Propose the required relay architecture, ports, internal communications, and integration plan.
+7. Identify any conflicts with existing services before proposing deployment changes.
+8. Provide exact proposed commands and configuration diffs for owner review.
+
+If the workspace or required files are unavailable, report that limitation instead of modifying another project directory.
+
+## 5. Actions requiring explicit owner approval
+
+Do not independently execute or apply changes to:
+- Host firewall rules or security groups.
+- Routing tables or network routes.
+- Public DNS records.
+- WireGuard host configuration, interfaces, keys, or peer settings.
+- Existing Docker deployments, Compose files, containers, networks, or volumes.
+- Production Nginx configuration or TLS certificates.
+- Existing application services or databases.
+- Publicly exposed ports or production service bindings.
+
+Do not run destructive commands, broad cleanup commands, production rebuilds, or restarts as part of routine investigation.
+
+Any deployment proposal must identify the affected resources, explain the impact, and provide a rollback procedure. Wait for the owner's approval before applying protected changes.
+
+## 6. Required response
+
+Before proceeding with integration, report:
+
+A. What currently exists in `/opt/odivora-v1b`.
+
+B. Which V1B backend and relay components are implemented, missing, or unverified.
+
+C. How the relay will remain isolated from the existing website and affiliate system.
+
+D. Which ports and domains the design requires, distinguishing proposed settings from verified settings.
+
+E. Any conflicts or risks identified.
+
+F. The next implementation steps, separated into:
+- Safe code development and testing.
+- Changes requiring owner approval.
+- Final deployment and verification.
+
+Do not claim a component is deployed, connected, secure, or operational without evidence.
+
+**Primary rule: Preserve the existing ODIVORA production environment. Develop the new relay separately, inspect before acting, and obtain owner approval before infrastructure changes.**

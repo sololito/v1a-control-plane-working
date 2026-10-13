@@ -146,6 +146,13 @@ class DataPlaneReadError(RuntimeError):
     """
 
 
+# Without a keepalive the gateway's outbound NAT mapping is torn down by the
+# router after a few minutes of silence, and the next inbound handshake from a
+# phone never arrives. It has to be set per peer (`wg set ... persistent-keepalive`):
+# wg-quick rejects PersistentKeepalive in the [Interface] section of wg0.conf.
+PEER_KEEPALIVE_SECONDS = 15
+
+
 class BaseDataPlane:
     interface = "wg0"
     wan_interface = "eth0"
@@ -167,6 +174,7 @@ class BaseDataPlane:
                 "allowed-ips", spec.allowed_ip]
         if spec.endpoint:
             args += ["endpoint", spec.endpoint]
+        args += ["persistent-keepalive", str(PEER_KEEPALIVE_SECONDS)]
         return self.runner.run(args)
 
     def remove_peer(self, peer_public_key: str) -> tuple[int, str]:
@@ -202,7 +210,8 @@ class BaseDataPlane:
         Changes here (DHCP lease, failover, mobile APN) are worth an event:
         the phone's direct-connection hint goes stale the moment it moves.
         """
-        rc, out = self.runner.run(["ip", "-4", "-o", "addr", "show", "dev", self.wan_interface])
+        rc, out = self.runner.run(["ip", "-4", "-o", "addr", "show", "dev",
+                                   self.resolve_wan_interface()])
         if rc != 0:
             return None
         tokens = out.split()
@@ -261,14 +270,16 @@ class BaseDataPlane:
         return rc == 0 and out.strip().splitlines()[0].strip() == "1" if out.strip() else False
 
     def resolve_wan_interface(self) -> str:
-        """Return a usable WAN interface name.
+        """Return the interface that actually carries uplink traffic.
 
-        If the configured name does not exist on this host, fall back to the
-        interface owning the default route so NAT actually applies.
+        NAT must egress from the interface holding the default route. The
+        configured WAN_INTERFACE can be a stale name from a previous network
+        whose NIC still exists on the host (a DOWN port after moving to
+        Wi-Fi): probing existence alone then keeps MASQUERADE pinned to an
+        interface that matches 0 packets, and the tunnel silently gets no
+        internet. Detect the live default route first and keep the configured
+        name only as a fallback when detection is unavailable.
         """
-        rc, _ = self.runner.run(["ip", "link", "show", self.wan_interface])
-        if rc == 0:
-            return self.wan_interface
         detected = detect_wan_interface(self.runner)
         if detected:
             return detected

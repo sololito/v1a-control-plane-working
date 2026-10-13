@@ -38,9 +38,9 @@ ENV_FILE = "/etc/odivora/gateway.env"
 WG_CONF_DIR = "/etc/wireguard"
 WG_CONF_FILE = os.path.join(WG_CONF_DIR, "wg0.conf")
 WG_PRIVATE_KEY_FILE = "/etc/odivora/wg_private_key"
-# Keep the gateway's own NAT mapping warm. Must be <= the relay's keepalive
-# cadence so neither side's mapping can lapse while the tunnel is idle.
-WG_KEEPALIVE_SECONDS = 15
+# Keep the gateway's own NAT mapping warm — see dataplane.PEER_KEEPALIVE_SECONDS,
+# applied per peer. Must be <= the relay's keepalive cadence so neither side's
+# mapping can lapse while the tunnel is idle.
 # ip_forward and the NAT rules are idempotent, so re-verifying them on every
 # peer sync is pure overhead (a handful of subprocesses each poll). Re-check
 # occasionally instead; anything that changes them out-of-band is still
@@ -315,13 +315,9 @@ def _write_wg_conf(cfg, gateway_id):
                 f"Address = {ip}/24\n"
                 "ListenPort = 51820\n"
                 f"PrivateKey = {private_key}\n"
-                # Without this the gateway's outbound NAT mapping is torn down
-                # by the router after a few minutes of silence, and the next
-                # inbound handshake from a phone never arrives. The phone gets
-                # the same setting from the Cloud, but the gateway was missing
-                # it entirely, so a tunnel that idled for a while came back
-                # dead on both the direct and relay paths.
-                f"PersistentKeepalive = {WG_KEEPALIVE_SECONDS}\n"
+                # Keepalive is per peer and set by dataplane.add_peer —
+                # wg-quick aborts with "Line unrecognized" if PersistentKeepalive
+                # appears here, which left wg0 permanently down.
             )
         os.chmod(WG_CONF_FILE, 0o600)
         print(f"[wg] wrote {WG_CONF_FILE} (Address {ip}/24, subnet {net})")
@@ -418,12 +414,15 @@ def main():
     max_backoff = args.max_backoff if args.max_backoff is not None else float(
     cfg.get("MAX_BACKOFF", "60"))
 
-    # Resolve the uplink once: a wrong name means MASQUERADE never matches
-    # and peers get a tunnel with no internet behind it.
+    # Resolve the uplink: a wrong name means MASQUERADE never matches and
+    # peers get a tunnel with no internet behind it. ensure_nat() re-resolves
+    # on every pass, so a NIC that goes down or a network change is followed
+    # without a restart.
     configured_wan = cfg["WAN_INTERFACE"]
     resolved_wan = dp.resolve_wan_interface()
     if resolved_wan != configured_wan:
-        print(f"[net] WAN_INTERFACE={configured_wan} not present; using default-route iface {resolved_wan}")
+        print(f"[net] WAN_INTERFACE={configured_wan} is not the uplink "
+              f"(missing or not the default route); using {resolved_wan}")
     dp.wan_interface = resolved_wan
     print(f"[net] wg={dp.interface} wan={dp.wan_interface} tunnel={dp.tunnel_subnet}")
     print(f"[loop] heartbeat {interval}s, backoff cap {max_backoff}s")

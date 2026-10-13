@@ -44,7 +44,7 @@ class Prefs(context: Context) {
     private fun prefsString(key: String): String? = sp.getString(key, null)
 
     companion object {
-        const val DEFAULT_BASE_URL = "https://image-valley-sealed-donald.trycloudflare.com"
+        const val DEFAULT_BASE_URL = "http://192.168.1.191:8000"
 
         fun normalize(url: String): String {
             var u = url.trim().trimEnd('/')

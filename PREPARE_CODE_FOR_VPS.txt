@@ -1,0 +1,221 @@
+# PREPARE CODE FOR VPS — deploy artifacts & runbook
+
+Design: **design 1** — the VPS co-hosts the **backend API** and the **relay**
+(UDP pair-forwarder). The home gateway dials *out* to the relay; the phone dials
+the relay. No router changes, no port forwarding, WireGuard stays end-to-end
+encrypted (the relay never decrypts). The routed-hub design in `VPS_RELAY.txt`
+§3 is intentionally not used: it is unnecessary and would need VPS routing,
+default-route and FORWARD changes.
+
+The spec this work follows is preserved in `VPS_RELAY.txt`. This file is the
+**code-preparation deliverable**: what is now in the repo, and the exact
+owner-run VPS batches to deploy it. Nothing here is executed by the assistant;
+all privileged VPS steps are run by the owner.
+
+---
+
+## 1. Repo artifacts prepared
+
+| Artifact | Purpose |
+|----------|---------|
+| `deploy/vps/odivora-api.service` | API unit for the isolated `/opt/odivora-v1b` deploy, bound to `127.0.0.1:8000` (nginx is the public door). |
+| `deploy/vps/odivora-relay.service` | Relay unit, control bound to `127.0.0.1:9090` (co-located API is its only client), data plane on UDP 20000-20999. |
+| `deploy/vps/odivora.env.example` | `.env` template for the co-located deploy (`RELAY_CONTROL_URL=http://127.0.0.1:9090`, `RELAY_PUBLIC_HOST=relay.odivora.com`). |
+| `scripts/e2e_smoke_test.py` | **Fixed**: it called the removed `generate-keys` endpoint (now `410`). Now generates the key on the "gateway" side and uploads only the public half to `wg-public-key`. |
+
+Why isolated: `/opt/odivora` is the protected production app. The V1B deploy
+lives in `/opt/odivora-v1b` with its own venv, `.env` and SQLite DB. Production
+nginx containers/Docker, ports 80/443, SSH and the default route are untouched.
+
+Ports opened for V1B (all on the VPS):
+
+| Port | Proto | Purpose | Source |
+|------|-------|---------|--------|
+| 20000-20999 | UDP | WireGuard relay pairs | any |
+| 3478 | UDP | rendezvous (STUN-lite), optional | any |
+| (none) | TCP | relay control 9090 and api 8000 stay on loopback | — |
+
+---
+
+## 2. Baseline (already done, before any VPS change)
+
+- `pytest -q` → **201 passed**.
+- Local run (relay + API): `scripts/e2e_smoke_test.py` all steps OK; UDP
+  datagrams forwarded phone<->gateway both ways.
+
+Read-only VPS inspection is **Batch 0** in `VPS_COMMANDS.txt`; run it first and
+report the output (is `/opt/odivora` production? are 8000/9090 free? how is the
+API to be exposed? is UDP 20000-20999 open at the provider?).
+
+---
+
+## 3. VPS batches (owner-run, one at a time)
+
+### Batch A — place the code at `/opt/odivora-v1b`
+
+Runs on: the **dev box** (copy) and the **VPS** (receive). Effect: adds a new
+directory only; production untouched.
+
+```bash
+# --- on the DEV BOX (this machine) ---
+# Copy the repo WITHOUT the venv, DBs, .env or git metadata. No secrets move.
+rsync -az --delete \
+  --exclude 'venv/' --exclude '.git/' --exclude '.env' \
+  --exclude '*.db' --exclude '__pycache__/' \
+  /opt/odivora/ <VPS_USER>@204.13.234.26:/tmp/odivora-v1b/
+
+# --- on the VPS ---
+sudo mkdir -p /opt/odivora-v1b
+sudo rsync -a /tmp/odivora-v1b/ /opt/odivora-v1b/
+sudo chown -R root:root /opt/odivora-v1b
+ls -la /opt/odivora-v1b/deploy/vps/
+```
+
+Rollback: `sudo rm -rf /opt/odivora-v1b /tmp/odivora-v1b`.
+
+### Batch B — venv, env, DB schema
+
+Runs on: the **VPS**. Effect: creates a venv and a new SQLite DB in the isolated
+dir; installs Python deps. Does not touch production or the system python.
+
+```bash
+cd /opt/odivora-v1b
+sudo apt-get update
+sudo apt-get install -y python3 python3-venv python3-pip
+python3 -m venv venv
+./venv/bin/pip install --upgrade pip
+./venv/bin/pip install -r requirements.txt
+
+# .env: fill SECRET_KEY (do NOT paste it into chat)
+sudo cp deploy/vps/odivora.env.example .env
+sudo sed -i "s|^SECRET_KEY=.*|SECRET_KEY=$(openssl rand -hex 32)|" .env
+sudo grep -E '^(APP_ENV|DATABASE_URL|RELAY_)' .env
+
+# schema (fresh SQLite DB in this dir)
+./venv/bin/python - <<'PY'
+import sqlite3, glob
+c = sqlite3.connect("odivora_home.db")
+for f in sorted(glob.glob("migrations/00*.sql")):
+    for line in open(f):
+        s = line.strip()
+        if s.startswith(("ALTER", "CREATE", "UPDATE")):
+            try: c.execute(s.rstrip(";"))
+            except Exception: pass
+c.commit()
+print("schema applied")
+PY
+```
+
+Rollback: `sudo rm -rf /opt/odivora-v1b/venv /opt/odivora-v1b/.env /opt/odivora-v1b/odivora_home.db`.
+
+### Batch C — install & start the two services
+
+Runs on: the **VPS**. Effect: enables a new `odivora-api` + `odivora-relay`
+pair (names are specific to this deploy). Does not restart anything else.
+
+```bash
+sudo cp /opt/odivora-v1b/deploy/vps/odivora-api.service   /etc/systemd/system/
+sudo cp /opt/odivora-v1b/deploy/vps/odivora-relay.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now odivora-relay odivora-api
+sleep 2
+systemctl --no-pager --full status odivora-relay odivora-api | sed -n '1,40p'
+curl -s http://127.0.0.1:8000/health; echo
+curl -s http://127.0.0.1:9090/sessions; echo
+sudo ss -lunp | grep -E ':3478|:20[0-9][0-9][0-9]\b' || true
+```
+
+Expected: `{"status":"ok"}`, `{"sessions": []}`, and UDP 3478 listening.
+
+Rollback: `sudo systemctl disable --now odivora-api odivora-relay`.
+
+### Batch D — expose the API + open the relay ports
+
+Runs on: the **VPS**. Effect: adds an nginx server block proxying a hostname to
+`127.0.0.1:8000`, and UFW rules **only** for the relay data plane. 80/443/SSH
+are not modified; no FORWARD/NAT/route changes.
+
+```bash
+# 4a. API over the existing nginx (recommended): reverse proxy a hostname
+#     (e.g. relay.odivora.com) -> 127.0.0.1:8000, then obtain a cert.
+sudo tee /etc/nginx/sites-available/odivora-v1b >/dev/null <<'CONF'
+server {
+    listen 80;
+    server_name relay.odivora.com;
+    location / {
+        proxy_pass http://127.0.0.1:8000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+CONF
+sudo ln -sf /etc/nginx/sites-available/odivora-v1b /etc/nginx/sites-enabled/odivora-v1b
+sudo nginx -t && sudo systemctl reload nginx
+
+# 4b. Relay data plane (UDP). Nothing else is opened.
+sudo ufw allow 20000:20999/udp
+sudo ufw allow 3478/udp
+sudo ufw status verbose
+```
+
+Also allow **UDP 20000-20999** (and 3478 if used) in the VPS **provider's**
+control-panel firewall.
+
+Rollback: `sudo rm -f /etc/nginx/sites-enabled/odivora-v1b /etc/nginx/sites-available/odivora-v1b && sudo systemctl reload nginx` ; `sudo ufw delete allow 20000:20999/udp && sudo ufw delete allow 3478/udp`.
+
+### Batch E — verify control plane end-to-end (from the VPS)
+
+Runs on: the **VPS**. Effect: none beyond creating one throwaway user/session in
+the new DB.
+
+```bash
+cd /opt/odivora-v1b
+./venv/bin/python scripts/e2e_smoke_test.py --api-base http://127.0.0.1:8000
+```
+
+Then the real route test (phone + home gateway) is Phase D/E of `VPS_RELAY.txt`
+and is driven separately.
+
+---
+
+## 4. What still needs the owner's Batch 0 output
+
+1. Whether `/opt/odivora` is production (we never touch it).
+2. Free ports (8000, 9090) and whether UDP 20000-20999 is open at the provider.
+3. The hostname for the API (reuse an existing proxied name; do not assume
+   `api.odivora.com` is wired up).
+4. Confirmation there is no existing `odivora-api`/`odivora-relay` unit that
+   these names would clobber (if so, rename — e.g. `odivora-v1b-api`).
+
+Once Batch 0 output is in, the unit names in Batch C may be adjusted and the
+batches issued verbatim.
+
+---
+
+## 5. Rollback (whole V1B deploy)
+
+```bash
+sudo systemctl disable --now odivora-api odivora-relay 2>/dev/null || true
+sudo rm -f /etc/systemd/system/odivora-api.service /etc/systemd/system/odivora-relay.service
+sudo systemctl daemon-reload
+sudo rm -f /etc/nginx/sites-enabled/odivora-v1b /etc/nginx/sites-available/odivora-v1b
+sudo systemctl reload nginx 2>/dev/null || true
+sudo ufw delete allow 20000:20999/udp 2>/dev/null || true
+sudo ufw delete allow 3478/udp 2>/dev/null || true
+sudo rm -rf /opt/odivora-v1b
+```
+
+---
+
+## 6. Map to VPS_RELAY.txt §13 required outputs
+
+- (1) architecture + baseline: `ARCHITECTURE.md`, `V1B_RELAY_NAT.md`, §2 here.
+- (4) WireGuard config generation: `app/routers/sessions_wg.py` `wg-config`
+  (relay endpoint when `connection_path == "relay"`).
+- (6) automated tests: `tests/test_relay.py`, `tests/test_relay_api.py`,
+  `tests/test_stage3_peer.py`, `tests/test_stage4_gateway.py` (all green).
+- (7)(8) VPS + gateway procedures: this file + `VPS_COMMANDS.txt` +
+  `DEPLOY_UBUNTU_FULL.md`.
+- (10) safe routing/firewall + rollback: §3 Batch D, §5.
+- (13) encryption: design 1 needs **no** hub-decryption caveat — the relay
+  forwards ciphertext only.

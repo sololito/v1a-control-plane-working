@@ -2,6 +2,7 @@ package com.odivora.app.ui
 
 import android.Manifest
 import android.content.ClipboardManager
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
@@ -39,6 +40,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import com.odivora.app.net.WgAuth
 import com.odivora.app.net.WgConfig
 import kotlinx.coroutines.delay
@@ -171,7 +173,7 @@ fun SessionScreen(sessionId: String, onBack: () -> Unit) {
             ) { Text("Open in WireGuard") }
             OutlinedButton(
                 enabled = configText.isNotBlank(),
-                onClick = { shareConfig(context, configText) },
+                onClick = { shareConfig(context, sessionId, configText) },
             ) { Text("Share") }
             OutlinedButton(
                 enabled = configText.isNotBlank(),
@@ -291,9 +293,19 @@ private fun Section(title: String) {
     )
 }
 
+/**
+ * WireGuard derives the tunnel name from the imported file name: it strips the
+ * `.conf` suffix and then validates it against `Tunnel.NAME_PATTERN`
+ * (`[a-zA-Z0-9_=+.-]{1,15}` — 15 because the name becomes the interface name,
+ * limited by Linux IFNAMSIZ). `odivora-` + 6 hex = 14 characters, so the file
+ * imports cleanly.
+ */
+private fun configFileName(sessionId: String): String =
+    "odivora-${sessionId.take(6)}.conf"
+
 private fun exportAndOpenWireGuard(context: Context, sessionId: String, configText: String) {
-    val name = "odivora-${sessionId.take(8)}.conf"
-    try {
+    val name = configFileName(sessionId)
+    val saved: String = try {
         saveToDownloads(context, name, configText)
     } catch (e: Exception) {
         toast(context, "Could not save $name — use Copy or Share instead.")
@@ -311,19 +323,47 @@ private fun exportAndOpenWireGuard(context: Context, sessionId: String, configTe
     toast(
         context,
         if (opened) {
-            "Saved Downloads/$name — tap + → Create from file or archive."
+            "Saved Downloads/$saved — tap + → Create from file or archive." +
+                " Already imported? Delete the old tunnel first."
         } else {
-            "Saved Downloads/$name — install WireGuard, then import it."
+            "Saved Downloads/$saved — install WireGuard, then import it."
         },
     )
 }
 
-private fun saveToDownloads(context: Context, name: String, text: String) {
+/**
+ * Writes [text] to Downloads under [name] and returns the name MediaProvider
+ * actually stored.
+ *
+ * The MIME type must be `application/octet-stream`: `.conf` has no registered
+ * extension mapping, so MediaProvider treats `text/plain` as a mismatch in
+ * `FileUtils.splitFileName` and rewrites the file to `odivora-….conf.txt`,
+ * which WireGuard then refuses to import.
+ */
+private fun saveToDownloads(context: Context, name: String, text: String): String {
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
         val resolver = context.contentResolver
+        // MediaProvider de-duplicates colliding names as "foo (1).conf"; the
+        // space and parentheses make WireGuard reject the tunnel name, so drop
+        // our own previous copy and write this one under the exact name.
+        runCatching {
+            resolver.query(
+                MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                arrayOf(MediaStore.Downloads._ID),
+                "${MediaStore.Downloads.DISPLAY_NAME}=?",
+                arrayOf(name),
+                null,
+            )?.use { c ->
+                val ids = ArrayList<Long>()
+                while (c.moveToNext()) ids.add(c.getLong(0))
+                ids.forEach { resolver.delete(
+                    ContentUris.withAppendedId(MediaStore.Downloads.EXTERNAL_CONTENT_URI, it),
+                    null, null) }
+            }
+        }
         val values = ContentValues().apply {
             put(MediaStore.Downloads.DISPLAY_NAME, name)
-            put(MediaStore.Downloads.MIME_TYPE, "text/plain")
+            put(MediaStore.Downloads.MIME_TYPE, "application/octet-stream")
             put(MediaStore.Downloads.IS_PENDING, 1)
         }
         val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
@@ -339,18 +379,43 @@ private fun saveToDownloads(context: Context, name: String, text: String) {
             runCatching { resolver.delete(uri, null, null) }
             throw e
         }
+        val actual = runCatching {
+            resolver.query(uri, arrayOf(MediaStore.Downloads.DISPLAY_NAME), null, null, null)
+                ?.use { c ->
+                    if (c.moveToFirst()) c.getString(0) else null
+                }
+        }.getOrNull()
+        return actual ?: name
     } else {
         @Suppress("DEPRECATION")
         val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
         dir.mkdirs()
         File(dir, name).writeText(text)
+        return name
     }
 }
 
-private fun shareConfig(context: Context, configText: String) {
-    val send = Intent(Intent.ACTION_SEND)
-        .setType("text/plain")
-        .putExtra(Intent.EXTRA_TEXT, configText)
+/**
+ * Shares the config as a real `odivora-….conf` file. Sharing raw text makes the
+ * receiving app save it as `odivora-….conf.txt`, which WireGuard will not import.
+ */
+private fun shareConfig(context: Context, sessionId: String, configText: String) {
+    val name = configFileName(sessionId)
+    val fileUri = runCatching {
+        val dir = File(context.cacheDir, "configs").apply { mkdirs() }
+        File(dir, name).writeText(configText)
+        FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", File(dir, name))
+    }.getOrNull()
+    val send = if (fileUri != null) {
+        Intent(Intent.ACTION_SEND)
+            .setType("*/*")
+            .putExtra(Intent.EXTRA_STREAM, fileUri)
+            .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+    } else {
+        Intent(Intent.ACTION_SEND)
+            .setType("text/plain")
+            .putExtra(Intent.EXTRA_TEXT, configText)
+    }
     runCatching { context.startActivity(Intent.createChooser(send, "Send WireGuard config")) }
         .onFailure { toast(context, "No share target available.") }
 }

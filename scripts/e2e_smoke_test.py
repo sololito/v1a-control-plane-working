@@ -84,8 +84,16 @@ def main():
                    {"firmware_version": "e2e-smoke", "nonce": "0000000001"}, token=gtok)
     step("heartbeat", code == 200)
 
-    code, keys = req("POST", f"{base}/api/v1/gateways/{gid}/generate-keys", {}, token=user_token)
-    step("generate-keys", code == 200, f"(pub {keys.get('public_key', '')[:8]}…)")
+    # The device owns its WireGuard private key; only the public half is
+    # uploaded. POST /generate-keys was removed (410) because it returned the
+    # private key to the caller and stored it server-side.
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+    wg_priv = X25519PrivateKey.generate()
+    wg_pub = base64.b64encode(wg_priv.public_key().public_bytes(
+        serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode()
+    code, keys = req("POST", f"{base}/api/v1/gateways/{gid}/wg-public-key",
+                     {"wg_public_key": wg_pub}, token=gtok)
+    step("register wg-public-key", code == 200, f"(pub {wg_pub[:8]}…)")
 
     code, sess = req("POST", f"{base}/api/v1/connections", {"gateway_id": gid}, token=user_token)
     step("create session", code == 200)

@@ -1,0 +1,25 @@
+# ODIVORA V1B runtime dependencies — API control plane + relay + gateway agent.
+#
+# Deliberately small and Python 3.14-friendly. This is NOT the production
+# /opt/odivora/requirements.txt (which is the Flask/torch affiliate stack and
+# requires Python <3.13). The relay process itself is stdlib-only; these are
+# what the FastAPI control plane needs.
+#
+# Lower bounds (>=) rather than pins so pip selects wheels that exist for the
+# interpreter on the host (Ubuntu 26.04 ships Python 3.14).
+fastapi>=0.115
+uvicorn>=0.34
+sqlalchemy>=2.0
+pydantic>=2.10
+pydantic-settings>=2.7
+PyJWT>=2.10
+passlib[bcrypt]>=1.7
+bcrypt>=4.2
+cryptography>=44.0
+email-validator>=2.2
+httpx>=0.28
+websockets>=13
+python-multipart>=0.0.20
+# Optional: Redis-backed rate limiting. app/ratelimit.py falls back to an
+# in-memory limiter when the package or server is absent.
+redis>=5.2
